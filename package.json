@@ -1,0 +1,65 @@
+{
+    "name": "cell-scxml-editor",
+    "displayName": "Cell SCXML Editor",
+    "description": "An Antigravity Extension for visual SCXML editing, modernizing the CellApps workflow.",
+    "version": "0.1.0",
+    "publisher": "antigravity",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Visualization",
+        "Programming Languages"
+    ],
+    "activationEvents": [],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "scxml-editor.openVisualEditor",
+                "title": "Open SCXML Visual Editor"
+            }
+        ],
+        "menus": {
+            "explorer/context": [
+                {
+                    "when": "resourceExtname == .scxml",
+                    "command": "scxml-editor.openVisualEditor",
+                    "group": "navigation"
+                }
+            ],
+            "editor/title": [
+                {
+                    "when": "resourceExtname == .scxml",
+                    "command": "scxml-editor.openVisualEditor",
+                    "group": "navigation"
+                }
+            ]
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js"
+    },
+    "devDependencies": {
+        "@types/glob": "^8.1.0",
+        "@types/mocha": "^10.0.1",
+        "@types/node": "16.x",
+        "@types/vscode": "^1.75.0",
+        "@typescript-eslint/eslint-plugin": "^5.53.0",
+        "@typescript-eslint/parser": "^5.53.0",
+        "@vscode/test-electron": "^2.3.0",
+        "@vscode/vsce": "^3.7.1",
+        "eslint": "^8.34.0",
+        "glob": "^8.1.0",
+        "mocha": "^10.2.0",
+        "typescript": "^4.9.5"
+    },
+    "dependencies": {
+        "fast-xml-parser": "^4.5.3"
+    }
+}
