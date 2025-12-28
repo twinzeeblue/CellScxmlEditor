@@ -4,6 +4,10 @@
     "description": "An Antigravity Extension for visual SCXML editing, modernizing the CellApps workflow.",
     "version": "0.1.0",
     "publisher": "antigravity",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/lieric/CellScxmlEditor.git"
+    },
     "engines": {
         "vscode": "^1.75.0"
     },
