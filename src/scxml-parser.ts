@@ -108,8 +108,20 @@ export class ScxmlParser {
             nodes.push(flowNode);
 
             // 處理 edges
+            const loops: any[] = [];
             for (const t of node.transitions) {
                 if (t.target) {
+                    // 偵測自循環
+                    if (t.target === node.id) {
+                        loops.push({
+                            event: t.event,
+                            cond: t.cond,
+                            type: t.type,
+                            qtPoint: t.qtPoint
+                        });
+                        continue;
+                    }
+
                     const color = colors[colorIdx % colors.length];
                     colorIdx++;
 
@@ -126,9 +138,6 @@ export class ScxmlParser {
                         label: t.event,
                         type: 'step',
                         animated: true,
-                        // 雖然 React Flow 預設沒有多 handle，但透過 sourceHandle/targetHandle 字串
-                        // 配合自定義節點或 CSS 可以實現視覺上的偏移，或直接讓佈局引擎處理。
-                        // 在標準 React Flow 中，這會影響連線落點計算。
                         sourceHandle: `s-${sOrder}`,
                         targetHandle: `t-${tOrder}`,
                         markerEnd: { type: 'arrowclosed', color: color },
@@ -144,6 +153,8 @@ export class ScxmlParser {
                     });
                 }
             }
+
+            flowNode.data.loops = loops;
 
             // 遞迴子節點
             for (const child of node.children) {
@@ -185,15 +196,40 @@ export class ScxmlParser {
             }
 
             // 更新此節點的出點連線 (Transitions)
-            for (const trans of node.transitions) {
-                // 優先比對 source 與 target
-                const matchedEdge = edges.find(e => e.source === node.id && e.target === trans.target);
-                if (matchedEdge) {
-                    trans.event = matchedEdge.label || trans.event;
-                    trans.cond = matchedEdge.cond || trans.cond;
+            const updatedTransitions: ScxmlTransition[] = [];
+
+            // 1. 處理自循環 (Loops)
+            if (flowNode.data?.loops && Array.isArray(flowNode.data.loops)) {
+                for (const loop of flowNode.data.loops) {
+                    updatedTransitions.push({
+                        event: loop.event,
+                        target: node.id,
+                        cond: loop.cond,
+                        type: loop.type,
+                        qtPoint: loop.qtPoint
+                    });
                 }
             }
 
+            // 2. 處理外部連線 (Edges)
+            for (const trans of node.transitions) {
+                // 跳過原本是自循環的部分，我們已經在上面處理過最新的了
+                if (trans.target === node.id) continue;
+
+                const matchedEdge = edges.find(e => e.source === node.id && e.target === trans.target);
+                if (matchedEdge) {
+                    updatedTransitions.push({
+                        ...trans,
+                        event: matchedEdge.label || trans.event,
+                        cond: matchedEdge.cond || trans.cond
+                    });
+                } else {
+                    // 如果找不到對應的 edge 且不是自循環，保持原樣 (可能是 parser 尚未掃描到的邊)
+                    updatedTransitions.push(trans);
+                }
+            }
+
+            node.transitions = updatedTransitions;
             node.children.forEach(updateNodeData);
         };
 

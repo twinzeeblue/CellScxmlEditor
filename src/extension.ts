@@ -26,12 +26,31 @@ export function activate(context: vscode.ExtensionContext) {
         const scxmlData = parser.parse(scxmlContent);
         const flowData = parser.toReactFlow(scxmlData);
 
+        // 獲取當前設定
+        const config = vscode.workspace.getConfiguration('cellScxmlEditor');
+        const showDebugInfo = config.get<boolean>('showDebugInfo', true);
+
         panel.webview.html = getWebviewContent();
 
         // 確保 Webview 載入完成後發送初始資料
         setTimeout(() => {
-            panel.webview.postMessage({ command: 'init', data: flowData });
+            panel.webview.postMessage({
+                command: 'init',
+                data: flowData,
+                settings: { showDebugInfo }
+            });
         }, 1000);
+
+        // 監聽設定變更
+        const configListener = vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('cellScxmlEditor.showDebugInfo')) {
+                const newShowDebugInfo = vscode.workspace.getConfiguration('cellScxmlEditor').get<boolean>('showDebugInfo', true);
+                panel.webview.postMessage({
+                    command: 'updateSettings',
+                    settings: { showDebugInfo: newShowDebugInfo }
+                });
+            }
+        });
 
         // 監聽來自 Webview 的訊息
         panel.webview.onDidReceiveMessage(
@@ -50,6 +69,10 @@ export function activate(context: vscode.ExtensionContext) {
             undefined,
             context.subscriptions
         );
+
+        panel.onDidDispose(() => {
+            configListener.dispose();
+        }, null, context.subscriptions);
     });
 
     context.subscriptions.push(disposable);
@@ -89,10 +112,31 @@ function getWebviewContent() {
             transition: all 0.2s ease;
             position: relative;
             background: transparent !important;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
         }
         .scxml-state { border-style: solid; }
         .scxml-parallel { border-style: dashed; }
         .scxml-final { border-style: double; }
+        .loop-container {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 4px;
+            width: 100%;
+        }
+        .loop-tag {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid currentColor;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 11px;
+            font-weight: 500;
+            white-space: nowrap;
+            opacity: 0.8;
+        }
         #loading { display: flex; justify-content: center; align-items: center; height: 100%; font-size: 1.2em; color: #718096; }
         #error-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); color: #ff5555; padding: 20px; display: none; z-index: 9999; }
     </style>
@@ -135,7 +179,6 @@ function getWebviewContent() {
         } from 'reactflow';
         import dagre from 'dagre';
 
-        // 自定義 SCXML 節點組件，支援多 Handle
         // 自定義 SCXML 節點組件，支援多 Handle
         const ScxmlNode = ({ data, id }) => {
             const sources = Array.from({ length: (data && data.sourceCount) || 0 }, (_, i) => i + 1);
@@ -181,6 +224,15 @@ function getWebviewContent() {
                         textShadow: '0 0 10px ' + borderColor + '44' 
                     }
                 }, data && data.label),
+
+                // 循環 (Loops) 清單
+                data && data.loops && data.loops.length > 0 && React.createElement('div', {
+                    className: 'loop-container'
+                }, data.loops.map((loop, idx) => React.createElement('div', {
+                    key: 'loop-' + idx,
+                    className: 'loop-tag',
+                    style: { color: borderColor }
+                }, "↻ " + (loop.event || 'unnamed')))),
                 
                 // 出點 Handles (底部)
                 sources.map(i => React.createElement(Handle, {
@@ -229,16 +281,37 @@ function getWebviewContent() {
 
             dagre.layout(dagreGraph);
 
-            nodes.forEach((node) => {
+            // 建立 ID 對應到 Dagre 結果的 Map 以加速查找
+            const dagreResults = new Map();
+            nodes.forEach(node => {
                 const nodeWithPosition = dagreGraph.node(node.id);
                 const w = node.width || node.style?.width || defaultNodeWidth;
                 const h = node.height || node.style?.height || defaultNodeHeight;
-                
-                // Dagre 的座標是中心點，React Flow 是左上角
-                node.position = {
-                    x: nodeWithPosition.x - w / 2,
-                    y: nodeWithPosition.y - h / 2,
-                };
+                dagreResults.set(node.id, {
+                    absX: nodeWithPosition.x - w / 2,
+                    absY: nodeWithPosition.y - h / 2,
+                    w, h
+                });
+            });
+
+            nodes.forEach((node) => {
+                const res = dagreResults.get(node.id);
+                if (!res) return;
+
+                if (node.parentNode) {
+                    const parentRes = dagreResults.get(node.parentNode);
+                    if (parentRes) {
+                        // 轉換絕對座標為相對父節點的座標
+                        node.position = {
+                            x: res.absX - parentRes.absX,
+                            y: res.absY - parentRes.absY
+                        };
+                    } else {
+                        node.position = { x: res.absX, y: res.absY };
+                    }
+                } else {
+                    node.position = { x: res.absX, y: res.absY };
+                }
             });
 
             return { nodes, edges };
@@ -254,10 +327,75 @@ function getWebviewContent() {
         const rootElement = document.getElementById('root');
         const root = createRoot(rootElement);
 
-        function Editor({ initialData }) {
+        function Editor({ initialData, initialSettings }) {
             const [nodes, setNodes] = useState(initialData?.nodes || []);
             const [edges, setEdges] = useState(initialData?.edges || []);
             const [selectedElement, setSelectedElement] = useState(null);
+            const [settings, setSettings] = useState(initialSettings || { showDebugInfo: true });
+            useEffect(() => {
+                const handleMessage = (event) => {
+                    const message = event.data;
+                    if (message.command === 'updateSettings') {
+                        setSettings(prev => ({ ...prev, ...message.settings }));
+                    }
+                };
+                window.addEventListener('message', handleMessage);
+                return () => window.removeEventListener('message', handleMessage);
+            }, []);
+
+            // 側邊欄寬度與收摺狀態
+            const [panelWidth, setPanelWidth] = useState(320); 
+            const [isPanelCollapsed, setIsPanelCollapsed] = useState(false);
+            const [isResizing, setIsResizing] = useState(false);
+
+            const startResizing = useCallback(() => setIsResizing(true), []);
+            const stopResizing = useCallback(() => setIsResizing(false), []);
+            const resize = useCallback((e) => {
+                if (isResizing) {
+                    const newWidth = window.innerWidth - e.clientX;
+                    // 限制最小 200px, 最大 800px
+                    if (newWidth > 200 && newWidth < 800) {
+                        setPanelWidth(newWidth);
+                    }
+                }
+            }, [isResizing]);
+
+            useEffect(() => {
+                if (isResizing) {
+                    window.addEventListener('mousemove', resize);
+                    window.addEventListener('mouseup', stopResizing);
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                } else {
+                    window.removeEventListener('mousemove', resize);
+                    window.removeEventListener('mouseup', stopResizing);
+                    document.body.style.cursor = 'default';
+                    document.body.style.userSelect = 'auto';
+                }
+                return () => {
+                    window.removeEventListener('mousemove', resize);
+                    window.removeEventListener('mouseup', stopResizing);
+                };
+            }, [isResizing, resize, stopResizing]);
+
+            const idToNode = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
+
+            const getAbsPos = useCallback((n) => {
+                let x = n.position.x;
+                let y = n.position.y;
+                let pid = n.parentNode || (n.data && n.data.parentNode);
+                let depth = 0;
+                while(pid && depth < 20) {
+                    const p = idToNode.get(pid);
+                    if(!p) break;
+                    x += p.position.x;
+                    y += p.position.y;
+                    pid = p.parentNode || (p.data && p.data.parentNode);
+                    depth++;
+                }
+                return { x, y };
+            }, [idToNode]);
+
             const flowWrapperRef = useState({ focusElement: null })[0];
             const reactFlowInstance = useReactFlow();
 
@@ -282,47 +420,21 @@ function getWebviewContent() {
             const processedEdges = useMemo(() => {
                 return edges.map(edge => {
                     // 找到 source 和 target 節點以計算中點座標
-                    const sourceNode = nodes.find(n => n.id === edge.source);
-                    const targetNode = nodes.find(n => n.id === edge.target);
+                    const sourceNode = idToNode.get(edge.source);
+                    const targetNode = idToNode.get(edge.target);
                     
-                    let coordLabel = '';
-                    if (sourceNode && targetNode && edge.source !== edge.target) {
-                        const sx = sourceNode.position.x + (sourceNode.width || 200) / 2;
-                        const sy = sourceNode.position.y + (sourceNode.height || 50) / 2;
-                        const tx = targetNode.position.x + (targetNode.width || 200) / 2;
-                        const ty = targetNode.position.y + (targetNode.height || 50) / 2;
-                        const centerX = Math.round((sx + tx) / 2);
-                        const centerY = Math.round((sy + ty) / 2);
-                        coordLabel = ' (' + centerX + ', ' + centerY + ')';
-                    }
                     
                     if (edge.source === edge.target) {
-                        // 自循環邊：提高 z-index 並偏移標籤位置以避免與 state 名稱重疊
-                        return {
-                            ...edge,
-                            zIndex: 1000,
-                            style: {
-                                ...edge.style,
-                                zIndex: 1000
-                            },
-                            labelStyle: {
-                                ...edge.labelStyle,
-                                transform: 'translateY(60px)'
-                            },
-                            labelBgStyle: {
-                                ...edge.labelBgStyle,
-                                transform: 'translateY(60px)'
-                            }
-                        };
+                        return null; // 此處理論上不會執行，因為解析器已過濾
                     }
-                    // 非自循環邊：添加座標到標籤
-                    const newLabel = (edge.data?.label || edge.label || '') + coordLabel;
+                    // 非自循環邊：使用原始標籤
+                    const originalLabel = edge.data?.label || edge.label || '';
                     return {
                         ...edge,
-                        label: newLabel,
+                        label: originalLabel,
                         data: {
                             ...edge.data,
-                            label: newLabel
+                            label: originalLabel
                         }
                     };
                 });
@@ -331,14 +443,11 @@ function getWebviewContent() {
             // 為 State 節點添加座標到標籤，並同步實際測量尺寸
             const processedNodes = useMemo(() => {
                 return nodes.map(node => {
-                    // 優先使用測量後的尺寸，確保 MiniMap 顯示正確
                     const measuredWidth = node.measured?.width || node.width;
                     const measuredHeight = node.measured?.height || node.height;
                     const w = measuredWidth || 200;
                     const h = measuredHeight || 50;
-                    const centerX = Math.round(node.position.x + w / 2);
-                    const centerY = Math.round(node.position.y + h / 2);
-                    const coordLabel = ' (' + centerX + ', ' + centerY + ')';
+                    
                     
                     return {
                         ...node,
@@ -352,11 +461,11 @@ function getWebviewContent() {
                         },
                         data: {
                             ...node.data,
-                            label: (node.data?.label || node.id || '').replace(/\s*\(\d+,\s*\d+\)$/, '') + coordLabel
+                            label: (node.data?.label || node.id || '').replace(/\s*\(\d+,\s*\d+\)$/, '')
                         }
                     };
                 });
-            }, [nodes]);
+            }, [nodes, getAbsPos]);
 
 
             const onNodesChange = useCallback(
@@ -458,14 +567,30 @@ function getWebviewContent() {
                         }
                     });
                     
-                    // 正規化座標：讓圖形中心對齊 (0, 0)
+                    // 正規化座標：讓圖形左上角對齊 (0, 0)
                     if (clonedNodes.length > 0) {
+                        const localMap = new Map(clonedNodes.map(n => [n.id, n]));
+                        const getLocalAbsPos = (n) => {
+                            let x = n.position.x;
+                            let y = n.position.y;
+                            let pid = n.parentNode || (n.data && n.data.parentNode);
+                            let depth = 0;
+                            while(pid && depth < 20) {
+                                const p = localMap.get(pid);
+                                if(!p) break;
+                                x += p.position.x;
+                                y += p.position.y;
+                                pid = p.parentNode || (p.data && p.data.parentNode);
+                                depth++;
+                            }
+                            return { x, y };
+                        };
+
                         let minX = Infinity, minY = Infinity;
                         let maxX = -Infinity, maxY = -Infinity;
                         
                         clonedNodes.forEach(node => {
-                            const x = node.position.x;
-                            const y = node.position.y;
+                            const { x, y } = getLocalAbsPos(node);
                             const w = node.width || 200;
                             const h = node.height || 50;
                             
@@ -482,8 +607,11 @@ function getWebviewContent() {
                         const offsetY = minY;
                         
                         clonedNodes.forEach(node => {
-                            node.position.x -= offsetX;
-                            node.position.y -= offsetY;
+                            // 僅偏移頂層節點，子節點會隨父節點移動
+                            if (!node.parentNode && !(node.data && node.data.parentNode)) {
+                                node.position.x -= offsetX;
+                                node.position.y -= offsetY;
+                            }
                             
                             // 強制更新位置緩存
                             nodePositionsCache.current.set(node.id, { ...node });
@@ -547,13 +675,13 @@ function getWebviewContent() {
                         
                         const rect = flowElement.getBoundingClientRect();
                         
-                        // 1. 視口尺寸與中心 (像素座標)
+                        // 1. 畫布尺寸與中心 (像素座標)
                         const vw = rect.width;
                         const vh = rect.height;
                         const cx = vw / 2;
                         const cy = vh / 2;
                         
-                        // 2. 視口光標 (相對容器像素)
+                        // 2. 畫布光標 (相對容器像素)
                         const vx = Math.round(x - rect.left);
                         const vy = Math.round(y - rect.top);
                         
@@ -609,8 +737,7 @@ function getWebviewContent() {
                             let maxX = -Infinity, maxY = -Infinity;
                             
                             nodes.forEach(n => {
-                                const x = n.position.x;
-                                const y = n.position.y;
+                                const { x, y } = getAbsPos(n);
                                 const w = n.width || n.measured?.width || 200;
                                 const h = n.height || n.measured?.height || 50;
                                 
@@ -658,8 +785,7 @@ function getWebviewContent() {
                         
                         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                         nodes.forEach(node => {
-                            const x = node.position.x;
-                            const y = node.position.y;
+                            const { x, y } = getAbsPos(node);
                             const w = node.width || node.style?.width || 200;
                             const h = node.height || node.style?.height || 50;
                             minX = Math.min(minX, x);
@@ -704,22 +830,6 @@ function getWebviewContent() {
             console.log('[Focus] Sidebar width:', sidebarWidth);
             console.log('[Focus] ReactFlow left offset:', rect.left);
             
-            // 輔助函式：計算節點絕對座標
-            const getAbsPos = (n) => {
-                let x = n.position.x;
-                let y = n.position.y;
-                let pid = n.parentNode || (n.data && n.data.parentNode);
-                let depth = 0;
-                while(pid && depth < 20) {
-                    const p = nodeMap.get(pid);
-                    if(!p) break;
-                    x += p.position.x;
-                    y += p.position.y;
-                    pid = p.parentNode || (p.data && p.data.parentNode);
-                    depth++;
-                }
-                return { x, y };
-            };
 
             if (element.type === 'node') {
                 const nodeId = element.data.id || element.data.data?.id;
@@ -798,75 +908,46 @@ function getWebviewContent() {
 
                 
                 
-                // 計算整個 Diagram 的尺寸
+                // 計算整個 Diagram 的尺寸 (完全基於絕對座標)
                 const diagramSize = useMemo(() => {
-                    if (nodes.length === 0) return { w: 0, h: 0 };
+                    if (nodes.length === 0) return { w: 0, h: 0, minX: 0, minY: 0, maxX: 0, maxY: 0 };
                     
                     let minX = Infinity, minY = Infinity;
                     let maxX = -Infinity, maxY = -Infinity;
                     
-                    // Debug info collection
-                    let debugNodeCount = 0;
-
-                    // 輔助函式：計算節點絕對座標
-                    const getAbsPos = (n) => {
-                        let x = n.position.x;
-                        let y = n.position.y;
-                        // parentNode 是 React Flow Node 的直接屬性
-                        let pid = n.parentNode || (n.data && n.data.parentNode);
-                        let depth = 0;
-                        while(pid && depth < 20) {
-                            const p = nodes.find(x => x.id === pid);
-                            if(!p) break;
-                            x += p.position.x;
-                            y += p.position.y;
-                            pid = p.parentNode || (p.data && p.data.parentNode);
-                            depth++;
-                        }
-                        return { x, y };
-                    };
-                    
                     nodes.forEach(node => {
+                        // 調用組件層級的 getAbsPos 取得絕對座標
                         const { x, y } = getAbsPos(node);
-                        // 嘗試多種來源讀取寬高：measured (v11+), width屬性, style屬性, 最後 fallback
-                        const w = node.measured?.width ?? node.width ?? (node.style?.width ? parseInt(node.style.width.toString()) : 0) ?? 200;
-                        const h = node.measured?.height ?? node.height ?? (node.style?.height ? parseInt(node.style.height.toString()) : 0) ?? 50;
+                        // 優先使用同步後的 width/height 屬性
+                        const w = node.width ?? node.measured?.width ?? (node.style?.width ? parseInt(node.style.width.toString()) : 0) ?? 200;
+                        const h = node.height ?? node.measured?.height ?? (node.style?.height ? parseInt(node.style.height.toString()) : 0) ?? 50;
                         
-                        // Debug log for first few nodes or suspicious ones
-                        if (debugNodeCount < 3) {
-                            console.log('[DiagramSize Debug] Node ' + node.id + ': Abs(' + x + ', ' + y + '), Size(' + w + ', ' + h + ')');
-                            debugNodeCount++;
-                        }
-
                         minX = Math.min(minX, x);
                         minY = Math.min(minY, y);
-                        // 確保 w, h 有數值，避免 NaN
-                        const validW = w || 200;
-                        const validH = h || 50;
-                        maxX = Math.max(maxX, x + validW);
-                        maxY = Math.max(maxY, y + validH);
+                        maxX = Math.max(maxX, x + (w || 200));
+                        maxY = Math.max(maxY, y + (h || 50));
                     });
                     
-                    if (minX === Infinity) return { w: 0, h: 0 };
+                    if (minX === Infinity) return { w: 0, h: 0, minX: 0, minY: 0, maxX: 0, maxY: 0 };
                     
                     const calculatedW = Math.round(maxX - minX);
                     const calculatedH = Math.round(maxY - minY);
-                    console.log('[DiagramSize Debug] Bounds: [' + minX + ', ' + minY + ', ' + maxX + ', ' + maxY + '], Size: ' + calculatedW + 'x' + calculatedH);
                     
-                    return { w: calculatedW, h: calculatedH };
-                }, [nodes]);
+                    return { w: calculatedW, h: calculatedH, minX: Math.round(minX), minY: Math.round(minY), maxX: Math.round(maxX), maxY: Math.round(maxY) };
+                }, [nodes, getAbsPos]);
 
-                // 顯示座標面板 (Bottom Right)
+                // 顯示座標面板 (Debug Info)
+                if (!settings.showDebugInfo) return null;
+
                 return React.createElement(Panel, { position: 'top-right', className: 'bg-black/70 p-2 rounded text-xs font-mono pointer-events-none z-50' },
-                    React.createElement('div', { className: 'text-yellow-400 mb-1' }, 'Viewport Center (' + cursorInfo.cx + ', ' + cursorInfo.cy + ')'),
-                    React.createElement('div', { className: 'text-red-400 mb-1' }, 'Viewport Cursor (' + cursorInfo.vx + ', ' + cursorInfo.vy + ')'),
-                    React.createElement('div', { className: 'text-orange-400 mb-1' }, 'Viewport Size (' + cursorInfo.vw + ', ' + cursorInfo.vh + ')'),
+                    React.createElement('div', { className: 'text-yellow-400 mb-1' }, 'Canvas Center (' + cursorInfo.cx + ', ' + cursorInfo.cy + ')'),
+                    React.createElement('div', { className: 'text-red-400 mb-1' }, 'Canvas Cursor (' + cursorInfo.vx + ', ' + cursorInfo.vy + ')'),
+                    React.createElement('div', { className: 'text-orange-400 mb-1' }, 'Canvas Size (' + cursorInfo.vw + ', ' + cursorInfo.vh + ')'),
                     React.createElement('div', { className: 'text-green-400 mb-1' }, 'Diagram Cursor (' + cursorInfo.dx + ', ' + cursorInfo.dy + ')'),
                     React.createElement('div', { className: 'text-blue-400' }, 'Diagram Size (' + diagramSize.w + ', ' + diagramSize.h + ')')
                 );
             }
-
-            return React.createElement('div', { className: 'flex w-full h-full' },
+            return React.createElement('div', { className: 'flex w-full h-full relative overflow-hidden' },
                 // 畫布區
                 React.createElement('div', { className: 'flex-grow h-full relative' },
                     React.createElement(ReactFlow, {
@@ -954,7 +1035,7 @@ function getWebviewContent() {
                                     return { x, y };
                                 };
                                 
-                                // 獲取當前視口資訊
+                                // 獲取當前畫布資訊
                                 const viewport = reactFlowInstance.getViewport();
                                 
                                 // 使用絕對座標計算 Flow 邊界
@@ -979,7 +1060,7 @@ function getWebviewContent() {
                                 
                                 console.log('[MiniMap] Clicked empty area:', 'RelativePos:', relativeX.toFixed(3), relativeY.toFixed(3), 'FlowPos:', Math.round(targetX), Math.round(targetY));
                                 
-                                // 保留當前縮放比例，僅移動視口中心
+                                // 保留當前縮放比例，僅移動畫布中心
                                 reactFlowInstance.setCenter(targetX, targetY, { zoom: viewport.zoom, duration: 800 });
                             }
                         }),
@@ -995,9 +1076,32 @@ function getWebviewContent() {
                         )
                     )
                 ),
+                // 收摺按鈕 (當面板隱藏且有選取元素時顯示在邊緣)
+                isPanelCollapsed && selectedElement && React.createElement('button', {
+                    className: 'absolute right-0 top-1/2 -translate-y-1/2 bg-[#1e293b] hover:bg-[#334155] text-white w-6 h-12 rounded-l border border-[#334155] border-r-0 z-50 flex items-center justify-center transition-all shadow-xl',
+                    onClick: () => setIsPanelCollapsed(false),
+                    title: '展開屬性面板'
+                }, '◀'),
+
+                // 調整寬度條 (Splitter)
+                !isPanelCollapsed && selectedElement && React.createElement('div', {
+                    className: 'w-1 hover:w-1.5 bg-[#334155] hover:bg-blue-500 cursor-col-resize transition-all z-50 relative group flex-shrink-0',
+                    onMouseDown: startResizing
+                },
+                    // 嵌入收摺按鈕在調整條附近
+                    React.createElement('button', {
+                        className: 'absolute right-full top-1/2 -translate-y-1/2 bg-[#334155] hover:bg-blue-600 text-white w-5 h-10 rounded-l flex items-center justify-center text-[10px] invisible group-hover:visible transition-all shadow-md',
+                        onClick: (e) => {
+                            e.stopPropagation();
+                            setIsPanelCollapsed(true);
+                        }
+                    }, '▶')
+                ),
+
                 // 屬性側邊欄
-                selectedElement && React.createElement('div', { 
-                    className: 'w-80 bg-[#1e293b] border-l border-[#334155] p-4 flex flex-col gap-4 text-sm overflow-auto max-h-full property-panel' 
+                !isPanelCollapsed && selectedElement && React.createElement('div', { 
+                    className: 'bg-[#1e293b] border-l border-[#334155] p-4 flex flex-col gap-4 text-sm overflow-auto max-h-full property-panel flex-shrink-0',
+                    style: { width: panelWidth + 'px' }
                 },
                     React.createElement('h3', { className: 'text-lg font-bold border-b border-[#334155] pb-2 text-blue-400' }, 
                         selectedElement.type === 'node' ? 'State Properties' : 'Transition Properties'
@@ -1067,103 +1171,156 @@ function getWebviewContent() {
                                     style: { opacity: 0.5 }
                                 })
                             ),
-                        React.createElement('div', { key: 'label-field' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Display Name'),
-                            React.createElement('input', {
-                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                value: (selectedElement.data.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
-                                onChange: (e) => onInputChange('label', e.target.value)
-                            })
-                        ),
-                        React.createElement('div', { key: 'onentry-field' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnEntry Script'),
-                            React.createElement('textarea', {
-                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
-                                value: selectedElement.data.data.onentry || '',
-                                onChange: (e) => onInputChange('onentry', e.target.value)
-                            })
-                        ),
-                        React.createElement('div', { key: 'onexit-field' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnExit Script'),
-                            React.createElement('textarea', {
-                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
-                                value: selectedElement.data.data.onexit || '',
-                                onChange: (e) => onInputChange('onexit', e.target.value)
-                            }),
-                        // 離開 (Outgoing) Transitions - 包含自循環
-                        React.createElement('div', { key: 'outgoing-transitions-list', className: 'mt-4' },
-                        React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '離開 (' + processedEdges.filter(e => e.source === selectedElement.data.id).length + ')'),
-                            React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
-                                processedEdges.filter(e => e.source === selectedElement.data.id).map((edge, idx) =>
-                                    React.createElement('div', {
-                                        key: 'out-' + idx,
-                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                            React.createElement('div', { key: 'label-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Display Name'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: (selectedElement.data.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
+                                    onChange: (e) => onInputChange('label', e.target.value)
+                                })
+                            ),
+                            React.createElement('div', { key: 'onentry-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnEntry Script'),
+                                React.createElement('textarea', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
+                                    value: selectedElement.data.data.onentry || '',
+                                    onChange: (e) => onInputChange('onentry', e.target.value)
+                                })
+                            ),
+                            React.createElement('div', { key: 'onexit-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnExit Script'),
+                                React.createElement('textarea', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
+                                    value: selectedElement.data.data.onexit || '',
+                                    onChange: (e) => onInputChange('onexit', e.target.value)
+                                })
+                            ),
+                            // 自循環 (Loops) 區塊
+                            React.createElement('div', { key: 'loops-section', className: 'mt-4 border-t border-[#334155] pt-4' },
+                                React.createElement('div', { className: 'flex justify-between items-center mb-2' },
+                                    React.createElement('label', { className: 'block text-gray-400 font-semibold' }, '循環 (Loops)'),
+                                    React.createElement('button', {
+                                        className: 'bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-[10px] transition-colors',
                                         onClick: () => {
-                                            const elem = {
-                                                type: 'edge',
-                                                data: edge
-                                            };
-                                            setSelectedElement(elem);
-                                            if (flowWrapperRef.focusElement) {
-                                                flowWrapperRef.focusElement(elem);
-                                            }
+                                            const currentLoops = selectedElement.data.data.loops || [];
+                                            const newLoops = [...currentLoops, { event: 'new.event', cond: '' }];
+                                            onInputChange('loops', newLoops);
                                         }
-                                    },
-                                        React.createElement('div', { className: 'flex justify-between items-center' },
-                                            React.createElement('span', { 
-                                                className: 'font-semibold',
-                                                style: { color: edge.style?.stroke || '#888' }
-                                            }, (edge.data?.label || edge.label || '(no event)')),
-                                            React.createElement('span', { className: 'text-gray-500' }, 
-                                                edge.source === edge.target ? '↺ 自循環' : '→ ' + edge.target
+                                    }, '+ 新增')
+                                ),
+                                React.createElement('div', { className: 'space-y-3' },
+                                    (selectedElement.data.data.loops || []).map((loop, idx) => 
+                                        React.createElement('div', { key: 'loop-edit-' + idx, className: 'bg-[#0f172a] p-2 rounded border border-[#334155] relative' },
+                                            React.createElement('button', {
+                                                className: 'absolute top-1 right-1 text-gray-500 hover:text-red-500',
+                                                onClick: () => {
+                                                    const newLoops = selectedElement.data.data.loops.filter((_, i) => i !== idx);
+                                                    onInputChange('loops', newLoops);
+                                                }
+                                            }, '✕'),
+                                            React.createElement('div', { className: 'mb-2' },
+                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Event'),
+                                                React.createElement('input', {
+                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
+                                                    value: loop.event || '',
+                                                    onChange: (e) => {
+                                                        const newLoops = [...selectedElement.data.data.loops];
+                                                        newLoops[idx] = { ...newLoops[idx], event: e.target.value };
+                                                        onInputChange('loops', newLoops);
+                                                    }
+                                                })
+                                            ),
+                                            React.createElement('div', null,
+                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Condition'),
+                                                React.createElement('input', {
+                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
+                                                    value: loop.cond || '',
+                                                    onChange: (e) => {
+                                                        const newLoops = [...selectedElement.data.data.loops];
+                                                        newLoops[idx] = { ...newLoops[idx], cond: e.target.value };
+                                                        onInputChange('loops', newLoops);
+                                                    }
+                                                })
                                             )
-                                        ),
-                                        edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
-                                    )
-                                ).concat(
-                                    processedEdges.filter(e => e.source === selectedElement.data.id).length === 0 
-                                        ? [React.createElement('div', { key: 'no-out', className: 'text-gray-500 text-xs italic' }, '無離開的 transitions')]
-                                        : []
+                                        )
+                                    ),
+                                    (selectedElement.data.data.loops || []).length === 0 && 
+                                        React.createElement('div', { className: 'text-gray-500 text-xs italic text-center py-2' }, '目前無自循環')
                                 )
-                            )
-                        ),
-                        // 進入 (Incoming) Transitions - 不包含自循環
-                        React.createElement('div', { key: 'incoming-transitions-list', className: 'mt-4' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '進入 (' + processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length + ')'),
-                            React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
-                                processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).map((edge, idx) =>
-                                    React.createElement('div', {
-                                        key: 'in-' + idx,
-                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
-                                        onClick: () => {
-                                            const elem = {
-                                                type: 'edge',
-                                                data: edge
-                                            };
-                                            setSelectedElement(elem);
-                                            if (flowWrapperRef.focusElement) {
-                                                flowWrapperRef.focusElement(elem);
+                            ),
+                            // 離開 (Outgoing) Transitions - 包含自循環
+                            React.createElement('div', { key: 'outgoing-transitions-list', className: 'mt-4' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '離開 (' + processedEdges.filter(e => e.source === selectedElement.data.id).length + ')'),
+                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
+                                    processedEdges.filter(e => e.source === selectedElement.data.id).map((edge, idx) =>
+                                        React.createElement('div', {
+                                            key: 'out-' + idx,
+                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                            onClick: () => {
+                                                const elem = {
+                                                    type: 'edge',
+                                                    data: edge
+                                                };
+                                                setSelectedElement(elem);
+                                                if (flowWrapperRef.focusElement) {
+                                                    flowWrapperRef.focusElement(elem);
+                                                }
                                             }
-                                        }
-                                    },
-                                        React.createElement('div', { className: 'flex justify-between items-center' },
-                                            React.createElement('span', { className: 'text-gray-500' }, edge.source + ' →'),
-                                            React.createElement('span', { 
-                                                className: 'font-semibold',
-                                                style: { color: edge.style?.stroke || '#888' }
-                                            }, (edge.data?.label || edge.label || '(no event)'))
-                                        ),
-                                        edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
+                                        },
+                                            React.createElement('div', { className: 'flex justify-between items-center' },
+                                                React.createElement('span', { 
+                                                    className: 'font-semibold',
+                                                    style: { color: edge.style?.stroke || '#888' }
+                                                }, (edge.data?.label || edge.label || '(no event)')),
+                                                React.createElement('span', { className: 'text-gray-500' }, 
+                                                    edge.source === edge.target ? '↺ 自循環' : '→ ' + edge.target
+                                                )
+                                            ),
+                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
+                                        )
+                                    ).concat(
+                                        processedEdges.filter(e => e.source === selectedElement.data.id).length === 0 
+                                            ? [React.createElement('div', { key: 'no-out', className: 'text-gray-500 text-xs italic' }, '無離開的 transitions')]
+                                            : []
                                     )
-                                ).concat(
-                                    processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length === 0 
-                                        ? [React.createElement('div', { key: 'no-in', className: 'text-gray-500 text-xs italic' }, '無進入的 transitions')]
-                                        : []
+                                )
+                            ),
+                            // 進入 (Incoming) Transitions - 不包含自循環
+                            React.createElement('div', { key: 'incoming-transitions-list', className: 'mt-4' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '進入 (' + processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length + ')'),
+                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
+                                    processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).map((edge, idx) =>
+                                        React.createElement('div', {
+                                            key: 'in-' + idx,
+                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                            onClick: () => {
+                                                const elem = {
+                                                    type: 'edge',
+                                                    data: edge
+                                                };
+                                                setSelectedElement(elem);
+                                                if (flowWrapperRef.focusElement) {
+                                                    flowWrapperRef.focusElement(elem);
+                                                }
+                                            }
+                                        },
+                                            React.createElement('div', { className: 'flex justify-between items-center' },
+                                                React.createElement('span', { className: 'text-gray-500' }, edge.source + ' →'),
+                                                React.createElement('span', { 
+                                                    className: 'font-semibold',
+                                                    style: { color: edge.style?.stroke || '#888' }
+                                                }, (edge.data?.label || edge.label || '(no event)'))
+                                            ),
+                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
+                                        )
+                                    ).concat(
+                                        processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length === 0 
+                                            ? [React.createElement('div', { key: 'no-in', className: 'text-gray-500 text-xs italic' }, '無進入的 transitions')]
+                                            : []
+                                    )
                                 )
                             )
-                        )
-                        )
-                    ] : [
+                        ] : [
                         React.createElement('div', { key: 'event-field' },
                             React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Event'),
                             React.createElement('input', {
@@ -1346,7 +1503,10 @@ function getWebviewContent() {
                     // 用 ReactFlowProvider 包裹 Editor，讓 useReactFlow 能正確運作
                     root.render(
                         React.createElement(ReactFlowProvider, null,
-                            React.createElement(Editor, { initialData: message.data })
+                            React.createElement(Editor, { 
+                                initialData: message.data, 
+                                initialSettings: message.settings 
+                            })
                         )
                     );
                 } catch (err) {

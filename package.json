@@ -39,6 +39,16 @@
                     "group": "navigation"
                 }
             ]
+        },
+        "configuration": {
+            "title": "Cell SCXML Editor",
+            "properties": {
+                "cellScxmlEditor.showDebugInfo": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether to show the debug info panel (coordinates, canvas size) in the visual editor."
+                }
+            }
         }
     },
     "scripts": {
