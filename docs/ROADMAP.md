@@ -39,10 +39,13 @@
 
 ## 未來計畫 (Future Plans)
 
-### Phase 5：邏輯與屬性編輯 (In Planning)
-- [ ] **屬性側邊欄**：選取節點時顯示側邊欄，編輯 `id`, `name`, `initial` 等屬性。
+### Phase 5：邏輯與屬性編輯
+- [x] **屬性側邊欄**：實作 `PropertyInspector` 組件，支援 `State` 與 `Transition` 屬性編輯。
+- [x] **屬性擴充**：支援 `initial`, `borderColor` (State) 與 `target`, `cond`, `event` (Transition) 編輯。
+- [x] **平行轉移視覺化**：實作 Parallel Edge 渲染，自動計算曲率與標籤位移以避免重疊。
 - [ ] **邏輯代碼編輯**：整合 Monaco Editor 於屬性面板，直接編輯 `onentry`, `onexit` 與 `script`。
-- [ ] **連線編輯**：支援在圖形中直接拖拽連線以修改 `transition` 目標。
+- [ ] **連線互動**：支援在圖形中直接拖拽連線以修改 `transition` 目標。
+- [ ] **驗證機制**：實作 ID 唯一性檢查。
 
 ### Phase 6：Antigravity AI 代理集成
 - [ ] **AI 輔助建模**：透過自然語言指令生成狀態機片段。

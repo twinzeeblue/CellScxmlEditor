@@ -164,9 +164,19 @@ function getWebviewContent() {
             Handle,
             Position,
             useReactFlow,
-            ReactFlowProvider
+            ReactFlowProvider,
+            BezierEdge
         } from 'reactflow';
         import dagre from 'dagre';
+
+        // 自定義 Edge 組件，支援動態曲率 (Curvature)
+        const CustomEdge = (props) => {
+            const { data } = props;
+            return React.createElement(BezierEdge, {
+                ...props,
+                curvature: data?.curvature
+            });
+        };
 
         // 自定義 SCXML 節點組件，支援多 Handle
         const ScxmlNode = ({ data, id }) => {
@@ -280,7 +290,7 @@ function getWebviewContent() {
             compound: ScxmlNode
         };
 
-        const dagreGraph = new dagre.graphlib.Graph();
+        const dagreGraph = new dagre.graphlib.Graph({ compound: true });
         dagreGraph.setDefaultEdgeLabel(() => ({}));
 
         const defaultNodeWidth = 200;
@@ -1023,6 +1033,16 @@ function getWebviewContent() {
                     if (n.parentNode) parentMap.set(n.id, n.parentNode);
                 });
 
+                // 1. 計算平行邊 (相同 Start/End) 的數量
+                const parallelEdgeCounts = new Map();
+                edges.forEach(e => {
+                    if (e.source !== e.target) {
+                        const key = e.source + '-' + e.target;
+                        parallelEdgeCounts.set(key, (parallelEdgeCounts.get(key) || 0) + 1);
+                    }
+                });
+                const parallelEdgeIndices = new Map();
+
                 // 輔助函數：計算節點深度
                 const getNodeDepth = (nodeId) => {
                     let depth = 0;
@@ -1050,24 +1070,48 @@ function getWebviewContent() {
                     if (targetNode && targetNode.parentNode && collapsedParents.has(targetNode.parentNode)) isHidden = true;
 
                     // 計算 Edge 的 zIndex
-                    // 取 Source 和 Target 兩者中較深的那個深度，作為 Edge 的層級
-                    // 這樣連線就會畫在該層級節點的「上方」（假設 React Flow Edge renderer 與 Node renderer 混合排序）
-                    // 註：React Flow 預設 Edge 在 Node 之下。若要 Edge 在 Node 之上，zIndex 需夠大。
-                    // 但通常我們希望 Edge 在 Parent 之上，但在 Source/Target Node 之下或是同一層。
-                    // 設定 zIndex 跟隨節點深度，至少確保它比 Parent (depth-1) 高。
                     const sourceDepth = sourceNode ? getNodeDepth(sourceNode.id) : 0;
                     const targetDepth = targetNode ? getNodeDepth(targetNode.id) : 0;
                     const edgeZIndex = Math.max(sourceDepth, targetDepth) + 1;
 
+                    // 平行邊處理 logic
+                    const key = edge.source + '-' + edge.target;
+                    const count = parallelEdgeCounts.get(key) || 0;
+                    const index = parallelEdgeIndices.get(key) || 0;
+                    parallelEdgeIndices.set(key, index + 1);
+
+                    let curvature = 0.2; // 預設曲率 (React Flow Default)
+                    let labelYOffset = 0;
+
+                    if (count > 1) {
+                         // 對稱分佈曲率: (index - center) * gap
+                         const gap = 0.25; 
+                         const center = (count - 1) / 2;
+                         curvature = 0.2 + (index - center) * gap;
+                         
+                         // 標籤 Y 軸錯開 (Pixel)
+                         // 讓標籤跟隨線條上下移動，避免重疊
+                         labelYOffset = (index - center) * 20; 
+                    }
+
                     const originalLabel = edge.data?.label || edge.label || '';
                     return {
                         ...edge,
+                        type: 'custom', // 使用自定義 Edge
                         label: originalLabel,
                         hidden: isHidden,
                         zIndex: edgeZIndex,
                         data: {
                             ...edge.data,
-                            label: originalLabel
+                            label: originalLabel,
+                            curvature: curvature 
+                        },
+                        labelStyle: {
+                            ...edge.labelStyle, 
+                            transform: 'translateY(' + labelYOffset + 'px)', // 使用字串連接
+                            fontSize: '11px',
+                            fontWeight: 500,
+                            fill: '#cbd5e1' // 確保標籤顏色清晰
                         }
                     };
                 }).filter(Boolean);
@@ -1638,6 +1682,10 @@ function getWebviewContent() {
                     React.createElement('div', { className: 'text-blue-400' }, 'Diagram Size (' + diagramSize.w + ', ' + diagramSize.h + ')')
                 );
             }
+
+            
+            const edgeTypes = useMemo(() => ({ custom: CustomEdge }), []);
+
             return React.createElement('div', { className: 'flex w-full h-full relative overflow-hidden' },
                 // 畫布區
                 React.createElement('div', { className: 'flex-grow h-full relative' },
@@ -1650,6 +1698,7 @@ function getWebviewContent() {
                         onEdgeClick: onEdgeClick,
                         onPaneClick: onPaneClick,
                         nodeTypes: nodeTypes,
+                        edgeTypes: edgeTypes,
                         fitView: false,
                         fitViewOptions: { padding: 0.3, maxZoom: 1.5, minZoom: 0.01 },
                         minZoom: 0.01,
