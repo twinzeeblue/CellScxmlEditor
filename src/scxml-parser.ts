@@ -83,12 +83,14 @@ export class ScxmlParser {
             const borderColor = borderColors[nodeColorIdx % borderColors.length];
             nodeColorIdx++;
 
+            const isCompound = node.children.length > 0;
             const flowNode: any = {
                 id: node.id,
-                type: node.type,
+                type: isCompound ? 'compound' : node.type,
                 data: {
                     label: node.id,
                     type: node.type,
+                    isCompound: isCompound,
                     onentry: node.onentry,
                     onexit: node.onexit,
                     sourceCount: sourceCounts.get(node.id) || 0,
@@ -97,7 +99,7 @@ export class ScxmlParser {
                     qtGeometry: node.qtGeometry
                 },
                 position: node.geometry ? { x: node.geometry.x, y: node.geometry.y } : { x: 0, y: 0 },
-                className: `scxml-${node.type}`
+                className: `scxml-${isCompound ? 'compound' : node.type}`
             };
 
             if (parentId) {
@@ -193,13 +195,16 @@ export class ScxmlParser {
                 // 同步腳本內容
                 node.onentry = flowNode.data?.onentry;
                 node.onexit = flowNode.data?.onexit;
+            } else {
+                // 如果找不到對應的 flowNode，可能該節點是隱藏的或是根節點
+                // 這裡可以選擇不更新或進行默認處理
             }
 
             // 更新此節點的出點連線 (Transitions)
             const updatedTransitions: ScxmlTransition[] = [];
 
             // 1. 處理自循環 (Loops)
-            if (flowNode.data?.loops && Array.isArray(flowNode.data.loops)) {
+            if (flowNode && flowNode.data?.loops && Array.isArray(flowNode.data.loops)) {
                 for (const loop of flowNode.data.loops) {
                     updatedTransitions.push({
                         event: loop.event,

@@ -99,26 +99,15 @@ function getWebviewContent() {
             box-shadow: none !important;
             padding: 0 !important;
         }
-        .react-flow__node-state, 
-        .react-flow__node-parallel, 
-        .react-flow__node-final {
-            background: transparent !important;
-            background-color: transparent !important;
-            border: none !important;
-        }
-        .scxml-node { 
-            border-radius: 12px; 
-            font-size: 13px;
-            transition: all 0.2s ease;
-            position: relative;
-            background: transparent !important;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
         .scxml-state { border-style: solid; }
         .scxml-parallel { border-style: dashed; }
         .scxml-final { border-style: double; }
+        .scxml-compound { 
+            border-style: solid; 
+            border-width: 2px !important;
+            background: rgba(255, 255, 255, 0.03) !important;
+        }
+        .scxml-node { 
         .loop-container {
             margin-top: 8px;
             display: flex;
@@ -184,6 +173,22 @@ function getWebviewContent() {
             const sources = Array.from({ length: (data && data.sourceCount) || 0 }, (_, i) => i + 1);
             const targets = Array.from({ length: (data && data.targetCount) || 0 }, (_, i) => i + 1);
             const borderColor = (data && data.borderColor) || '#4299e1';
+            const isCompound = data && data.isCompound;
+            const isCollapsed = data && data.isCollapsed;
+
+            const onToggleCollapse = (e) => {
+                e.stopPropagation();
+                if (data.onToggleCollapse) {
+                    data.onToggleCollapse(id);
+                }
+            };
+
+            const onLayoutChildren = (e) => {
+                e.stopPropagation();
+                if (data.onLayoutChildren) {
+                    data.onLayoutChildren(id);
+                }
+            };
 
             const nodeStyle = {
                 border: '2px solid ' + borderColor,
@@ -195,10 +200,13 @@ function getWebviewContent() {
                 WebkitBackdropFilter: 'blur(12px)',
                 boxShadow: '0 0 20px ' + borderColor + '44',
                 color: borderColor,
-                padding: '16px',
+                padding: '0px', 
                 borderRadius: '12px',
                 minWidth: '180px',
-                overflow: 'visible'
+                overflow: 'visible',
+                boxSizing: 'border-box',
+                width: '100%',
+                height: '100%'
             };
 
             return React.createElement('div', { 
@@ -214,20 +222,40 @@ function getWebviewContent() {
                     style: { left: ((i / (targets.length + 1)) * 100) + "%", background: borderColor, border: '1px solid #fff' }
                 })),
                 
-                // 節點內容
+                // 節點內容 (包含收摺按鈕與排版按鈕)
                 React.createElement('div', { 
-                    className: 'font-bold text-center truncate pointer-events-none',
-                    style: { 
-                        color: borderColor, 
-                        fontSize: '14px',
-                        letterSpacing: '0.5px',
-                        textShadow: '0 0 10px ' + borderColor + '44' 
-                    }
-                }, data && data.label),
+                    className: 'flex items-center w-full ' + (isCompound ? 'mb-2' : 'justify-center pointer-events-none'),
+                    style: { padding: '16px 16px 0 16px' } 
+                },
+                    isCompound && React.createElement('button', {
+                        className: 'mr-1 text-lg hover:bg-white/10 rounded w-6 h-6 flex items-center justify-center transition-colors',
+                        onClick: onToggleCollapse,
+                        style: { color: borderColor },
+                        title: isCollapsed ? 'Expand' : 'Collapse'
+                    }, isCollapsed ? '⊕' : '⊖'),
+                    isCompound && !isCollapsed && React.createElement('button', {
+                        className: 'mr-2 text-lg hover:bg-white/10 rounded w-6 h-6 flex items-center justify-center transition-colors',
+                        onClick: onLayoutChildren,
+                        style: { color: borderColor },
+                        title: 'Auto Layout Children'
+                    }, '⌖'),
+                    React.createElement('div', { 
+                        className: 'font-bold truncate',
+                        style: { 
+                            color: borderColor, 
+                            fontSize: isCompound ? '16px' : '14px',
+                            letterSpacing: '0.5px',
+                            textShadow: '0 0 10px ' + borderColor + '44',
+                            flexGrow: 1,
+                            textAlign: isCompound ? 'left' : 'center'
+                        }
+                    }, data && data.label)
+                ),
 
                 // 循環 (Loops) 清單
                 data && data.loops && data.loops.length > 0 && React.createElement('div', {
-                    className: 'loop-container'
+                    className: 'loop-container',
+                    style: { padding: '0 16px' } // 在內部保留循環標籤間距
                 }, data.loops.map((loop, idx) => React.createElement('div', {
                     key: 'loop-' + idx,
                     className: 'loop-tag',
@@ -248,7 +276,8 @@ function getWebviewContent() {
         const nodeTypes = {
             state: ScxmlNode,
             parallel: ScxmlNode,
-            final: ScxmlNode
+            final: ScxmlNode,
+            compound: ScxmlNode
         };
 
         const dagreGraph = new dagre.graphlib.Graph();
@@ -260,19 +289,27 @@ function getWebviewContent() {
         const getLayoutedElements = (nodes, edges, direction = 'TB') => {
             dagreGraph.setGraph({ 
                 rankdir: direction,
-                nodesep: 50,      // 進一步減少水平間距（原 80）
-                ranksep: 60,      // 進一步減少垂直間距（原 100）
-                marginx: 30,      // 減少邊距（原 50）
-                marginy: 30,      // 減少邊距（原 50）
+                nodesep: 80,      // 增加間距以利於 Compound 顯示
+                ranksep: 100,
+                marginx: 50,
+                marginy: 50,
                 ranker: 'network-simplex',
-                edgesep: 5        // 進一步減少邊緣間距（原 10）
+                edgesep: 10,
+                compound: true    // 啟動 Compound Graph 支援
             });
 
+            // 首先設定所有節點
             nodes.forEach((node) => {
-                // 優先使用節點原本的寬高，否則使用預設值
                 const w = node.width || node.style?.width || defaultNodeWidth;
                 const h = node.height || node.style?.height || defaultNodeHeight;
                 dagreGraph.setNode(node.id, { width: w, height: h });
+            });
+
+            // 設定父子關係
+            nodes.forEach((node) => {
+                if (node.parentNode) {
+                    dagreGraph.setParent(node.id, node.parentNode);
+                }
             });
 
             edges.forEach((edge) => {
@@ -281,27 +318,40 @@ function getWebviewContent() {
 
             dagre.layout(dagreGraph);
 
-            // 建立 ID 對應到 Dagre 結果的 Map 以加速查找
+            // 建立 ID 對應到 Dagre 結果的 Map
             const dagreResults = new Map();
             nodes.forEach(node => {
                 const nodeWithPosition = dagreGraph.node(node.id);
                 const w = node.width || node.style?.width || defaultNodeWidth;
                 const h = node.height || node.style?.height || defaultNodeHeight;
+                
+                // Dagre 對於 compound node 會自動計算出中心點 x, y 與其子節點合併後的寬高
                 dagreResults.set(node.id, {
-                    absX: nodeWithPosition.x - w / 2,
-                    absY: nodeWithPosition.y - h / 2,
-                    w, h
+                    absX: nodeWithPosition.x - nodeWithPosition.width / 2,
+                    absY: nodeWithPosition.y - nodeWithPosition.height / 2,
+                    w: nodeWithPosition.width,
+                    h: nodeWithPosition.height
                 });
             });
 
+            // 更新節點位置與尺寸
             nodes.forEach((node) => {
                 const res = dagreResults.get(node.id);
                 if (!res) return;
+
+                // 更新尺寸以符合 Dagre 計算出的 Compound 尺寸
+                node.width = res.w;
+                node.height = res.h;
+                if (node.style) {
+                    node.style.width = res.w;
+                    node.style.height = res.h;
+                }
 
                 if (node.parentNode) {
                     const parentRes = dagreResults.get(node.parentNode);
                     if (parentRes) {
                         // 轉換絕對座標為相對父節點的座標
+                        // 注意：React Flow 的 Parent Node 座標系統中，(0,0) 是父節點左上角
                         node.position = {
                             x: res.absX - parentRes.absX,
                             y: res.absY - parentRes.absY
@@ -326,6 +376,390 @@ function getWebviewContent() {
 
         const rootElement = document.getElementById('root');
         const root = createRoot(rootElement);
+
+        const PropertyInspector = ({
+            isCollapsed,
+            onToggleCollapse,
+            width,
+            onStartResizing,
+            selectedElement,
+            data, // { nodes, processedEdges }
+            onUpdate,
+            onSelect
+        }) => {
+            const { nodes, processedEdges } = data;
+
+            if (isCollapsed || !selectedElement) {
+                return React.createElement(React.Fragment, null,
+                    // 收摺按鈕
+                    isCollapsed && selectedElement && React.createElement('button', {
+                        className: 'absolute right-0 top-1/2 -translate-y-1/2 bg-[#1e293b] hover:bg-[#334155] text-white w-6 h-12 rounded-l border border-[#334155] border-r-0 z-50 flex items-center justify-center transition-all shadow-xl',
+                        onClick: () => onToggleCollapse(false),
+                        title: '展開屬性面板'
+                    }, '◀')
+                );
+            }
+
+            return React.createElement(React.Fragment, null,
+                // 調整寬度條 (Splitter)
+                React.createElement('div', {
+                    className: 'w-1 hover:w-1.5 bg-[#334155] hover:bg-blue-500 cursor-col-resize transition-all z-50 relative group flex-shrink-0',
+                    onMouseDown: onStartResizing
+                },
+                    // 嵌入收摺按鈕在調整條附近
+                    React.createElement('button', {
+                        className: 'absolute right-full top-1/2 -translate-y-1/2 bg-[#334155] hover:bg-blue-600 text-white w-5 h-10 rounded-l flex items-center justify-center text-[10px] invisible group-hover:visible transition-all shadow-md',
+                        onClick: (e) => {
+                            e.stopPropagation();
+                            onToggleCollapse(true);
+                        }
+                    }, '▶')
+                ),
+
+                // 屬性側邊欄
+                React.createElement('div', { 
+                    className: 'bg-[#1e293b] border-l border-[#334155] p-4 flex flex-col gap-4 text-sm overflow-auto max-h-full property-panel flex-shrink-0',
+                    style: { width: width + 'px' }
+                },
+                    React.createElement('h3', { className: 'text-lg font-bold border-b border-[#334155] pb-2 text-blue-400' }, 
+                        selectedElement.type === 'node' ? 'State Properties' : 'Transition Properties'
+                    ),
+                    selectedElement.type === 'node' ? [
+                            React.createElement('div', { key: 'id-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'State ID'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: selectedElement.data.id || '',
+                                    readOnly: true, // ID 目前不建議更改，因為是連線 Key
+                                    style: { opacity: 0.5 }
+                                })
+                            ),
+                            React.createElement('div', { key: 'qt-position-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Qt Position'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: selectedElement.data.data.qtGeometry ? 
+                                        selectedElement.data.data.qtGeometry.x + ', ' + selectedElement.data.data.qtGeometry.y : 'N/A',
+                                    readOnly: true,
+                                    style: { opacity: 0.5 }
+                                })
+                            ),
+                            React.createElement('div', { key: 'position-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 
+                                    'Layout Position' + (selectedElement.data.parentNode ? ' (Relative)' : '')
+                                ),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: selectedElement.data.position ? 
+                                        Math.round(selectedElement.data.position.x) + ', ' + Math.round(selectedElement.data.position.y) : 'N/A',
+                                    readOnly: true,
+                                    style: { opacity: 0.5 }
+                                })
+                            ),
+                            React.createElement('div', { key: 'abs-position-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Absolute Position'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: (() => {
+                                        if (!selectedElement.data.position) return 'N/A';
+                                        
+                                        // 遞迴計算絕對座標
+                                        let x = selectedElement.data.position.x;
+                                        let y = selectedElement.data.position.y;
+                                        let parentId = selectedElement.data.parentNode;
+                                        
+                                        while (parentId) {
+                                            const parent = nodes.find(n => n.id === parentId);
+                                            if (!parent) break;
+                                            x += parent.position.x;
+                                            y += parent.position.y;
+                                            parentId = parent.parentNode;
+                                        }
+                                        
+                                        return Math.round(x) + ', ' + Math.round(y);
+                                    })(),
+                                    readOnly: true,
+                                    style: { opacity: 0.5 }
+                                })
+                            ),
+                            React.createElement('div', { key: 'label-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Display Name'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: (selectedElement.data.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
+                                    onChange: (e) => onUpdate('label', e.target.value)
+                                })
+                            ),
+                            React.createElement('div', { key: 'initial-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Initial State ID'),
+                                React.createElement('input', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                    value: selectedElement.data.data.initial || '',
+                                    placeholder: 'Child state ID',
+                                    onChange: (e) => onUpdate('initial', e.target.value)
+                                })
+                            ),
+                            React.createElement('div', { key: 'color-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Border Color'),
+                                React.createElement('div', { className: 'flex gap-2' },
+                                    React.createElement('input', {
+                                        type: 'color',
+                                        className: 'h-9 bg-transparent cursor-pointer',
+                                        value: selectedElement.data.data.borderColor || '#4299e1',
+                                        onChange: (e) => onUpdate('borderColor', e.target.value)
+                                    }),
+                                    React.createElement('input', {
+                                        className: 'flex-1 bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                        value: selectedElement.data.data.borderColor || '#4299e1',
+                                        onChange: (e) => onUpdate('borderColor', e.target.value)
+                                    })
+                                )
+                            ),
+                            React.createElement('div', { key: 'onentry-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnEntry Script'),
+                                React.createElement('textarea', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
+                                    value: selectedElement.data.data.onentry || '',
+                                    onChange: (e) => onUpdate('onentry', e.target.value)
+                                })
+                            ),
+                            React.createElement('div', { key: 'onexit-field' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnExit Script'),
+                                React.createElement('textarea', {
+                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
+                                    value: selectedElement.data.data.onexit || '',
+                                    onChange: (e) => onUpdate('onexit', e.target.value)
+                                })
+                            ),
+                            // 自循環 (Loops) 區塊
+                            React.createElement('div', { key: 'loops-section', className: 'mt-4 border-t border-[#334155] pt-4' },
+                                React.createElement('div', { className: 'flex justify-between items-center mb-2' },
+                                    React.createElement('label', { className: 'block text-gray-400 font-semibold' }, '循環 (Loops)'),
+                                    React.createElement('button', {
+                                        className: 'bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-[10px] transition-colors',
+                                        onClick: () => {
+                                            const currentLoops = selectedElement.data.data.loops || [];
+                                            const newLoops = [...currentLoops, { event: 'new.event', cond: '' }];
+                                            onUpdate('loops', newLoops);
+                                        }
+                                    }, '+ 新增')
+                                ),
+                                React.createElement('div', { className: 'space-y-3' },
+                                    (selectedElement.data.data.loops || []).map((loop, idx) => 
+                                        React.createElement('div', { key: 'loop-edit-' + idx, className: 'bg-[#0f172a] p-2 rounded border border-[#334155] relative' },
+                                            React.createElement('button', {
+                                                className: 'absolute top-1 right-1 text-gray-500 hover:text-red-500',
+                                                onClick: () => {
+                                                    const newLoops = selectedElement.data.data.loops.filter((_, i) => i !== idx);
+                                                    onUpdate('loops', newLoops);
+                                                }
+                                            }, '✕'),
+                                            React.createElement('div', { className: 'mb-2' },
+                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Event'),
+                                                React.createElement('input', {
+                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
+                                                    value: loop.event || '',
+                                                    onChange: (e) => {
+                                                        const newLoops = [...selectedElement.data.data.loops];
+                                                        newLoops[idx] = { ...newLoops[idx], event: e.target.value };
+                                                        onUpdate('loops', newLoops);
+                                                    }
+                                                })
+                                            ),
+                                            React.createElement('div', null,
+                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Condition'),
+                                                React.createElement('input', {
+                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
+                                                    value: loop.cond || '',
+                                                    onChange: (e) => {
+                                                        const newLoops = [...selectedElement.data.data.loops];
+                                                        newLoops[idx] = { ...newLoops[idx], cond: e.target.value };
+                                                        onUpdate('loops', newLoops);
+                                                    }
+                                                })
+                                            )
+                                        )
+                                    ),
+                                    (selectedElement.data.data.loops || []).length === 0 && 
+                                        React.createElement('div', { className: 'text-gray-500 text-xs italic text-center py-2' }, '目前無自循環')
+                                )
+                            ),
+                            // 離開 (Outgoing) Transitions
+                            React.createElement('div', { key: 'outgoing-transitions-list', className: 'mt-4' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '離開 (' + processedEdges.filter(e => e.source === selectedElement.data.id).length + ')'),
+                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
+                                    processedEdges.filter(e => e.source === selectedElement.data.id).map((edge, idx) =>
+                                        React.createElement('div', {
+                                            key: 'out-' + idx,
+                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                            onClick: () => {
+                                                const elem = { type: 'edge', data: edge };
+                                                onSelect(elem);
+                                            }
+                                        },
+                                            React.createElement('div', { className: 'flex justify-between items-center' },
+                                                React.createElement('span', { 
+                                                    className: 'font-semibold',
+                                                    style: { color: edge.style?.stroke || '#888' }
+                                                }, (edge.data?.label || edge.label || '(no event)')),
+                                                React.createElement('span', { className: 'text-gray-500' }, 
+                                                    edge.source === edge.target ? '↺ 自循環' : '→ ' + edge.target
+                                                )
+                                            ),
+                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
+                                        )
+                                    ).concat(
+                                        processedEdges.filter(e => e.source === selectedElement.data.id).length === 0 
+                                            ? [React.createElement('div', { key: 'no-out', className: 'text-gray-500 text-xs italic' }, '無離開的 transitions')]
+                                            : []
+                                    )
+                                )
+                            ),
+                            // 進入 (Incoming) Transitions
+                            React.createElement('div', { key: 'incoming-transitions-list', className: 'mt-4' },
+                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '進入 (' + processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length + ')'),
+                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
+                                    processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).map((edge, idx) =>
+                                        React.createElement('div', {
+                                            key: 'in-' + idx,
+                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                            onClick: () => {
+                                                const elem = { type: 'edge', data: edge };
+                                                onSelect(elem);
+                                            }
+                                        },
+                                            React.createElement('div', { className: 'flex justify-between items-center' },
+                                                React.createElement('span', { className: 'text-gray-500' }, edge.source + ' →'),
+                                                React.createElement('span', { 
+                                                    className: 'font-semibold',
+                                                    style: { color: edge.style?.stroke || '#888' }
+                                                }, (edge.data?.label || edge.label || '(no event)'))
+                                            ),
+                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
+                                        )
+                                    ).concat(
+                                        processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length === 0 
+                                            ? [React.createElement('div', { key: 'no-in', className: 'text-gray-500 text-xs italic' }, '無進入的 transitions')]
+                                            : []
+                                    )
+                                )
+                            )
+                        ] : [
+                        // Transition 屬性
+                        React.createElement('div', { key: 'event-field' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Event'),
+                            React.createElement('input', {
+                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                value: (selectedElement.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
+                                onChange: (e) => onUpdate('label', e.target.value)
+                            })
+                        ),
+                        React.createElement('div', { key: 'qt-position-field' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Qt Position'),
+                            React.createElement('input', {
+                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                value: selectedElement.data.qtPoint ? 
+                                    selectedElement.data.qtPoint.x + ', ' + selectedElement.data.qtPoint.y : 'N/A',
+                                readOnly: true,
+                                style: { opacity: 0.5 }
+                            })
+                        ),
+                        React.createElement('div', { key: 'edge-position-field' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Layout Position (Relative)'),
+                            React.createElement('input', {
+                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
+                                value: (() => {
+                                    if (selectedElement.data.source && selectedElement.data.target && nodes) {
+                                        const sourceNode = nodes.find(n => n.id === selectedElement.data.source);
+                                        const targetNode = nodes.find(n => n.id === selectedElement.data.target);
+                                        if (sourceNode && targetNode && sourceNode.position && targetNode.position && selectedElement.data.source !== selectedElement.data.target) {
+                                            const sx = sourceNode.position.x + (sourceNode.width || 200) / 2;
+                                            const sy = sourceNode.position.y + (sourceNode.height || 50) / 2;
+                                            const tx = targetNode.position.x + (targetNode.width || 200) / 2;
+                                            const ty = targetNode.position.y + (targetNode.height || 50) / 2;
+                                            return Math.round((sx + tx) / 2) + ', ' + Math.round((sy + ty) / 2);
+                                        }
+                                    }
+                                    return 'Auto';
+                                })(),
+                                readOnly: true,
+                                style: { opacity: 0.5 }
+                            })
+                        ),
+                        React.createElement('div', { key: 'cond-field' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Condition'),
+                            React.createElement('textarea', {
+                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-16',
+                                value: selectedElement.data.cond || '',
+                                onChange: (e) => onUpdate('cond', e.target.value)
+                            })
+                        ),
+                        // 來源 (Source) State
+                        React.createElement('div', { key: 'source-state', className: 'mt-4' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '來源 State'),
+                            React.createElement('div', { className: 'space-y-2' },
+                                nodes.filter(node => node.id === selectedElement.data.source).map((node, idx) =>
+                                    React.createElement('div', {
+                                        key: 'source-' + idx,
+                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                        style: {
+                                            borderLeftWidth: '3px',
+                                            borderLeftColor: node.data?.borderColor || '#4299e1'
+                                        },
+                                        onClick: () => {
+                                            const elem = { type: 'node', data: node };
+                                            onSelect(elem);
+                                        }
+                                    },
+                                        React.createElement('div', { className: 'flex justify-between items-center' },
+                                            React.createElement('span', { 
+                                                className: 'font-semibold',
+                                                style: { color: node.data?.borderColor || '#4299e1' }
+                                            }, node.data?.label || node.id),
+                                            React.createElement('span', { className: 'text-gray-500 text-[10px]' }, node.data?.type || 'state')
+                                        ),
+                                        React.createElement('div', { className: 'text-gray-400 mt-1 text-[10px]' }, 
+                                            'ID: ' + node.id
+                                        )
+                                    )
+                                )
+                            )
+                        ),
+                        // 結束 (Target) State
+                        React.createElement('div', { key: 'target-state', className: 'mt-4' },
+                            React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '結束 State'),
+                            React.createElement('div', { className: 'space-y-2' },
+                                nodes.filter(node => node.id === selectedElement.data.target).map((node, idx) =>
+                                    React.createElement('div', {
+                                        key: 'target-' + idx,
+                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
+                                        style: {
+                                            borderLeftWidth: '3px',
+                                            borderLeftColor: node.data?.borderColor || '#4299e1'
+                                        },
+                                        onClick: () => {
+                                            const elem = { type: 'node', data: node };
+                                            onSelect(elem);
+                                        }
+                                    },
+                                        React.createElement('div', { className: 'flex justify-between items-center' },
+                                            React.createElement('span', { 
+                                                className: 'font-semibold',
+                                                style: { color: node.data?.borderColor || '#4299e1' }
+                                            }, node.data?.label || node.id),
+                                            React.createElement('span', { className: 'text-gray-500 text-[10px]' }, node.data?.type || 'state')
+                                        ),
+                                        React.createElement('div', { className: 'text-gray-400 mt-1 text-[10px]' }, 
+                                            'ID: ' + node.id
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    ]
+                )
+            );
+        };
 
         function Editor({ initialData, initialSettings }) {
             const [nodes, setNodes] = useState(initialData?.nodes || []);
@@ -395,6 +829,168 @@ function getWebviewContent() {
                 }
                 return { x, y };
             }, [idToNode]);
+            
+            // 輔助函數：遞迴重新計算所有父節點的邊界 (Moved up to prevent ReferenceError)
+            const recalculateBoundaries = useCallback((currentNodes) => {
+                let newNodes = [...currentNodes];
+                let anyChanges = false;
+                let iterationLimit = 10; // 防止理論上的無限循環
+                
+                while (iterationLimit > 0) {
+                    let loopChanges = false;
+                    const parents = new Set(newNodes.filter(n => n.parentNode).map(n => n.parentNode));
+                    
+                    parents.forEach(parentId => {
+                        const parentIdx = newNodes.findIndex(n => n.id === parentId);
+                        if (parentIdx === -1) return;
+                        
+                        const parent = newNodes[parentIdx];
+                        if (parent.data?.isCollapsed) return;
+
+                        const directChildren = newNodes.filter(n => n.parentNode === parentId && !n.hidden);
+                        if (directChildren.length === 0) return;
+
+                        const hasLoops = parent.data?.loops && parent.data.loops.length > 0;
+                        const padding = 24; // 邊界預留空間
+                        const headerHeight = hasLoops ? 80 : 50; // 完全由 JS 控制的標題高度
+                        
+                        // 1. 檢查是否有子節點太靠近頂部 (遮擋標題或 Loops)
+                        let minY = Infinity;
+                        directChildren.forEach(child => {
+                            minY = Math.min(minY, child.position.y);
+                        });
+
+                        // 如果最上方的子節點 y 座標小於 headerHeight，則需要下移所有子節點
+                        if (minY < headerHeight) {
+                            const offsetY = headerHeight - minY;
+                            newNodes = newNodes.map(node => {
+                                if (node.parentNode === parentId) {
+                                    return { 
+                                        ...node, 
+                                        position: { ...node.position, y: node.position.y + offsetY } 
+                                    };
+                                }
+                                return node;
+                            });
+                            loopChanges = true;
+                            anyChanges = true;
+                        }
+
+                        // 2. 計算包含所有子節點所需的最小邊界
+                        let maxX = 0;
+                        let maxY = 0;
+
+                        // 重新獲取最新的子節點 (可能已被上一步更新座標)
+                        const updatedChildren = newNodes.filter(n => n.parentNode === parentId && !n.hidden);
+                        updatedChildren.forEach(child => {
+                            const cx = child.position.x;
+                            const cy = child.position.y;
+                            const cw = (child.width || 200);
+                            const ch = (child.height || 50);
+                            maxX = Math.max(maxX, cx + cw + padding);
+                            maxY = Math.max(maxY, cy + ch + padding);
+                        });
+                        
+                        // 確保最小寬高度
+                        maxX = Math.max(maxX, 200);
+                        maxY = Math.max(maxY, headerHeight + 40);
+
+                        if (Math.abs((parent.width || 0) - maxX) > 1 || Math.abs((parent.height || 0) - maxY) > 1) {
+                            newNodes[parentIdx] = {
+                                ...parent,
+                                width: maxX,
+                                height: maxY,
+                                style: {
+                                    ...parent.style,
+                                    width: maxX,
+                                    height: maxY
+                                }
+                            };
+                            loopChanges = true;
+                            anyChanges = true;
+                        }
+                    });
+
+                    if (!loopChanges) break;
+                    iterationLimit--;
+                }
+
+                return { updatedNodes: newNodes, hasChanges: anyChanges };
+            }, []);
+
+            // 局部自動排版函數
+            const layoutSubgraph = useCallback((parentId) => {
+                setNodes((currentNodes) => {
+                    // 1. 找出直系子節點
+                    const directChildren = currentNodes.filter(n => n.parentNode === parentId && !n.hidden);
+                    if (directChildren.length === 0) return currentNodes;
+
+                    // 2. 找出相關連線 (兩端都在子節點集合中)
+                    const childrenIds = new Set(directChildren.map(n => n.id));
+                    const internalEdges = edges.filter(e => childrenIds.has(e.source) && childrenIds.has(e.target));
+
+                    // 3. 建立臨時 Dagre Graph
+                    const subGraph = new dagre.graphlib.Graph();
+                    subGraph.setGraph({ 
+                        rankdir: 'TB', 
+                        nodesep: 50, 
+                        ranksep: 50 
+                    });
+                    subGraph.setDefaultEdgeLabel(() => ({}));
+
+                    directChildren.forEach(node => {
+                        subGraph.setNode(node.id, { 
+                            width: node.width || 200, 
+                            height: node.height || 50 
+                        });
+                    });
+
+                    internalEdges.forEach(edge => {
+                        subGraph.setEdge(edge.source, edge.target);
+                    });
+
+                    // 4. 執行佈局
+                    dagre.layout(subGraph);
+
+                    // 5. 計算並更新位置
+                    const parentNode = currentNodes.find(n => n.id === parentId);
+                    const hasLoops = parentNode?.data?.loops && parentNode.data.loops.length > 0;
+                    const headerOffset = hasLoops ? 80 : 50;
+                    const paddingX = 24;
+
+                    // 找出 Layout 結果的左上角偏移，將其歸零並加上 padding
+                    let minLayoutX = Infinity;
+                    let minLayoutY = Infinity;
+                    
+                    directChildren.forEach(node => {
+                        const nodeWithPos = subGraph.node(node.id);
+                        // Dagre 節點位置是中心點，需轉換為左上角
+                        const x = nodeWithPos.x - (node.width || 200) / 2;
+                        const y = nodeWithPos.y - (node.height || 50) / 2;
+                        minLayoutX = Math.min(minLayoutX, x);
+                        minLayoutY = Math.min(minLayoutY, y);
+                    });
+
+                    const newNodes = currentNodes.map(node => {
+                        if (childrenIds.has(node.id)) {
+                            const res = subGraph.node(node.id);
+                            // 轉換中心點至左上角，並校正相對位置
+                            const x = res.x - (node.width || 200) / 2 - minLayoutX + paddingX;
+                            const y = res.y - (node.height || 50) / 2 - minLayoutY + headerOffset;
+                            
+                            return {
+                                ...node,
+                                position: { x, y }
+                            };
+                        }
+                        return node;
+                    });
+
+                    // 確保觸發邊界重算
+                    const result = recalculateBoundaries(newNodes);
+                    return result.updatedNodes;
+                });
+            }, [edges, recalculateBoundaries]);
 
             const flowWrapperRef = useState({ focusElement: null })[0];
             const reactFlowInstance = useReactFlow();
@@ -416,63 +1012,144 @@ function getWebviewContent() {
                 }
             }, [nodes, edges, selectedElement]);
 
-            // 處理自循環邊的層級和標籤位置，並為所有邊添加座標
+            // 處理自循環邊的層級和標籤位置，並為所有邊添加座標，同時隱藏收摺節點的連線
             const processedEdges = useMemo(() => {
+                // 找出所有被收摺節點的 ID 集合
+                const collapsedParents = new Set(nodes.filter(n => n.data?.isCollapsed).map(n => n.id));
+
+                // 建立 ID -> ParentID 的映射以計算深度
+                const parentMap = new Map();
+                nodes.forEach(n => {
+                    if (n.parentNode) parentMap.set(n.id, n.parentNode);
+                });
+
+                // 輔助函數：計算節點深度
+                const getNodeDepth = (nodeId) => {
+                    let depth = 0;
+                    let currentId = nodeId;
+                    while (currentId && parentMap.has(currentId)) {
+                        depth++;
+                        currentId = parentMap.get(currentId);
+                        if (depth > 100) break;
+                    }
+                    return depth;
+                };
+                
                 return edges.map(edge => {
-                    // 找到 source 和 target 節點以計算中點座標
+                    // 找到 source 和 target 節點
                     const sourceNode = idToNode.get(edge.source);
                     const targetNode = idToNode.get(edge.target);
                     
-                    
                     if (edge.source === edge.target) {
-                        return null; // 此處理論上不會執行，因為解析器已過濾
+                        return null; 
                     }
-                    // 非自循環邊：使用原始標籤
+
+                    // 如果 source 或 target 的 parent 被收摺，則隱藏此邊
+                    let isHidden = false;
+                    if (sourceNode && sourceNode.parentNode && collapsedParents.has(sourceNode.parentNode)) isHidden = true;
+                    if (targetNode && targetNode.parentNode && collapsedParents.has(targetNode.parentNode)) isHidden = true;
+
+                    // 計算 Edge 的 zIndex
+                    // 取 Source 和 Target 兩者中較深的那個深度，作為 Edge 的層級
+                    // 這樣連線就會畫在該層級節點的「上方」（假設 React Flow Edge renderer 與 Node renderer 混合排序）
+                    // 註：React Flow 預設 Edge 在 Node 之下。若要 Edge 在 Node 之上，zIndex 需夠大。
+                    // 但通常我們希望 Edge 在 Parent 之上，但在 Source/Target Node 之下或是同一層。
+                    // 設定 zIndex 跟隨節點深度，至少確保它比 Parent (depth-1) 高。
+                    const sourceDepth = sourceNode ? getNodeDepth(sourceNode.id) : 0;
+                    const targetDepth = targetNode ? getNodeDepth(targetNode.id) : 0;
+                    const edgeZIndex = Math.max(sourceDepth, targetDepth) + 1;
+
                     const originalLabel = edge.data?.label || edge.label || '';
                     return {
                         ...edge,
                         label: originalLabel,
+                        hidden: isHidden,
+                        zIndex: edgeZIndex,
                         data: {
                             ...edge.data,
                             label: originalLabel
                         }
                     };
-                });
-            }, [edges, nodes]);
+                }).filter(Boolean);
+            }, [edges, nodes, idToNode]);
 
-            // 為 State 節點添加座標到標籤，並同步實際測量尺寸
+            // 為 State 節點添加座標到標籤，並同步實際測量尺寸，同時處理收摺隱藏
             const processedNodes = useMemo(() => {
+                // 找出所有被收摺節點的 ID 集合
+                const collapsedParents = new Set(nodes.filter(n => n.data?.isCollapsed).map(n => n.id));
+
+                // 建立 ID -> ParentID 的映射以計算深度
+                const parentMap = new Map();
+                nodes.forEach(n => {
+                    if (n.parentNode) parentMap.set(n.id, n.parentNode);
+                });
+
                 return nodes.map(node => {
+                    // 如果 parent 被收摺，則隱藏此節點
+                    const isHidden = node.parentNode && collapsedParents.has(node.parentNode);
+
+                    // 計算深度以決定 zIndex
+                    let depth = 0;
+                    let currentParent = node.parentNode;
+                    while (currentParent) {
+                        depth++;
+                        currentParent = parentMap.get(currentParent);
+                        if (depth > 100) break; // 防止死循環防護
+                    }
+
                     const measuredWidth = node.measured?.width || node.width;
                     const measuredHeight = node.measured?.height || node.height;
-                    const w = measuredWidth || 200;
-                    const h = measuredHeight || 50;
-                    
+                    const w = measuredWidth || (node.data?.isCollapsed ? 120 : 200);
+                    const h = measuredHeight || (node.data?.isCollapsed ? 40 : 50);
                     
                     return {
                         ...node,
+                        hidden: isHidden,
+                        zIndex: depth + 1, // 深度越深，zIndex 越高，確保子節點顯示在父節點之上
                         // 同步測量尺寸到直接屬性，供 MiniMap 使用
                         width: w,
                         height: h,
                         style: {
                             ...node.style,
                             width: w,
-                            height: h
+                            height: h,
+                            opacity: node.data?.isCollapsed ? 0.7 : 1,
+                            zIndex: depth + 1 // 將 zIndex 也應用於 style
                         },
                         data: {
                             ...node.data,
-                            label: (node.data?.label || node.id || '').replace(/\s*\(\d+,\s*\d+\)$/, '')
+                            label: (node.data?.label || node.id || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
+                            onToggleCollapse: (nodeId) => {
+                                setNodes(nds => nds.map(n => {
+                                    if (n.id === nodeId) {
+                                        return { ...n, data: { ...n.data, isCollapsed: !n.data.isCollapsed } };
+                                    }
+                                    return n;
+                                }));
+                            },
+                            onLayoutChildren: layoutSubgraph 
                         }
                     };
-                });
-            }, [nodes, getAbsPos]);
+                }).filter(Boolean);
+            }, [nodes, getAbsPos, layoutSubgraph]);
 
 
             const onNodesChange = useCallback(
                 (changes) => setNodes((nds) => {
                     const updatedNodes = applyNodeChanges(changes, nds);
-                    // 僅在 React Flow 提供實際測量尺寸 (measured) 時才同步到 width/height 屬性
-                    // 這能解決 MiniMap 讀取錯誤尺寸的問題
+                    
+                    // 偵測移動或尺寸變更
+                    const needsCheck = changes.some(c => 
+                        (c.type === 'position' && c.dragging) || 
+                        (c.type === 'dimensions')
+                    );
+
+                    if (needsCheck) {
+                        const result = recalculateBoundaries(updatedNodes);
+                        if (result.hasChanges) return result.updatedNodes;
+                    }
+
+                    // 同步測量尺寸
                     return updatedNodes.map((node) => {
                         if (node.measured && (node.width !== node.measured.width || node.height !== node.measured.height)) {
                             return {
@@ -489,8 +1166,18 @@ function getWebviewContent() {
                         return node;
                     });
                 }),
-                []
+                [recalculateBoundaries]
             );
+
+            // 初始載入時校準邊界
+            useEffect(() => {
+                if (nodes.length > 0) {
+                    const result = recalculateBoundaries(nodes);
+                    if (result.hasChanges) {
+                        setNodes(result.updatedNodes);
+                    }
+                }
+            }, []);
             const onEdgesChange = useCallback(
                 (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
                 []
@@ -618,7 +1305,11 @@ function getWebviewContent() {
                         });
                     }
                     
-                    setNodes(clonedNodes);
+                    // 佈局後強制重新計算邊界，確保父節點完整包含子節點
+                    const layoutBoundariesResult = recalculateBoundaries(clonedNodes);
+                    const finalizedNodes = layoutBoundariesResult.updatedNodes;
+                    
+                    setNodes(finalizedNodes);
                     setEdges(clonedEdges);
                     
                     // 佈局完成後自動將視圖置中並更新邊界
@@ -1067,8 +1758,9 @@ function getWebviewContent() {
                         React.createElement(Panel, { position: 'top-left', className: 'bg-[#2d3748] p-2 rounded shadow-lg border border-[#4a5568]' },
                             React.createElement('button', { 
                                 onClick: () => onLayout('TB', true),
-                                className: 'bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm transition-colors'
-                            }, 'Auto Layout')
+                                className: 'bg-blue-600 hover:bg-blue-700 text-white w-8 h-8 rounded text-lg flex items-center justify-center transition-colors',
+                                title: 'Auto Layout'
+                            }, '⌖')
                         ),
                         // 導航提示面板
                         React.createElement(Panel, { position: 'bottom-center', className: 'bg-[#2d3748] p-2 rounded shadow-lg border border-[#4a5568] text-xs text-gray-400 mb-2' },
@@ -1076,426 +1768,24 @@ function getWebviewContent() {
                         )
                     )
                 ),
-                // 收摺按鈕 (當面板隱藏且有選取元素時顯示在邊緣)
-                isPanelCollapsed && selectedElement && React.createElement('button', {
-                    className: 'absolute right-0 top-1/2 -translate-y-1/2 bg-[#1e293b] hover:bg-[#334155] text-white w-6 h-12 rounded-l border border-[#334155] border-r-0 z-50 flex items-center justify-center transition-all shadow-xl',
-                    onClick: () => setIsPanelCollapsed(false),
-                    title: '展開屬性面板'
-                }, '◀'),
-
-                // 調整寬度條 (Splitter)
-                !isPanelCollapsed && selectedElement && React.createElement('div', {
-                    className: 'w-1 hover:w-1.5 bg-[#334155] hover:bg-blue-500 cursor-col-resize transition-all z-50 relative group flex-shrink-0',
-                    onMouseDown: startResizing
-                },
-                    // 嵌入收摺按鈕在調整條附近
-                    React.createElement('button', {
-                        className: 'absolute right-full top-1/2 -translate-y-1/2 bg-[#334155] hover:bg-blue-600 text-white w-5 h-10 rounded-l flex items-center justify-center text-[10px] invisible group-hover:visible transition-all shadow-md',
-                        onClick: (e) => {
-                            e.stopPropagation();
-                            setIsPanelCollapsed(true);
+                // 屬性檢閱器 (Property Inspector)
+                React.createElement(PropertyInspector, {
+                    isCollapsed: isPanelCollapsed,
+                    onToggleCollapse: setIsPanelCollapsed,
+                    width: panelWidth,
+                    onStartResizing: startResizing,
+                    selectedElement: selectedElement,
+                    data: { nodes, processedEdges },
+                    onUpdate: onInputChange,
+                    onSelect: (elem) => {
+                        setSelectedElement(elem);
+                        if (flowWrapperRef.focusElement) {
+                            flowWrapperRef.focusElement(elem);
                         }
-                    }, '▶')
-                ),
-
-                // 屬性側邊欄
-                !isPanelCollapsed && selectedElement && React.createElement('div', { 
-                    className: 'bg-[#1e293b] border-l border-[#334155] p-4 flex flex-col gap-4 text-sm overflow-auto max-h-full property-panel flex-shrink-0',
-                    style: { width: panelWidth + 'px' }
-                },
-                    React.createElement('h3', { className: 'text-lg font-bold border-b border-[#334155] pb-2 text-blue-400' }, 
-                        selectedElement.type === 'node' ? 'State Properties' : 'Transition Properties'
-                    ),
-                    selectedElement.type === 'node' ? [
-                            React.createElement('div', { key: 'id-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'State ID'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: selectedElement.data.id || '',
-                                    readOnly: true, // ID 目前不建議更改，因為是連線 Key
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'qt-position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Qt Position'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: selectedElement.data.data.qtGeometry ? 
-                                        selectedElement.data.data.qtGeometry.x + ', ' + selectedElement.data.data.qtGeometry.y : 'N/A',
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 
-                                    'Layout Position' + (selectedElement.data.parentNode ? ' (Relative)' : '')
-                                ),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: selectedElement.data.position ? 
-                                        Math.round(selectedElement.data.position.x) + ', ' + Math.round(selectedElement.data.position.y) : 'N/A',
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'abs-position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Absolute Position'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: (() => {
-                                        if (!selectedElement.data.position) return 'N/A';
-                                        
-                                        // 遞迴計算絕對座標
-                                        let x = selectedElement.data.position.x;
-                                        let y = selectedElement.data.position.y;
-                                        let parentId = selectedElement.data.parentNode;
-                                        
-                                        console.log('[AbsPos debug] Start: ' + selectedElement.data.id + ' (' + x + ', ' + y + '), Parent: ' + parentId);
-                                        
-                                        while (parentId) {
-                                            const parent = nodes.find(n => n.id === parentId);
-                                            if (!parent) {
-                                                console.warn('[AbsPos debug] Parent not found: ' + parentId);
-                                                break;
-                                            }
-                                            console.log('[AbsPos debug] + Parent ' + parent.id + ': (' + parent.position.x + ', ' + parent.position.y + ')');
-                                            x += parent.position.x;
-                                            y += parent.position.y;
-                                            parentId = parent.parentNode;
-                                        }
-                                        console.log('[AbsPos debug] Result: (' + x + ', ' + y + ')');
-                                        
-                                        return Math.round(x) + ', ' + Math.round(y);
-                                    })(),
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'label-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Display Name'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: (selectedElement.data.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
-                                    onChange: (e) => onInputChange('label', e.target.value)
-                                })
-                            ),
-                            React.createElement('div', { key: 'onentry-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnEntry Script'),
-                                React.createElement('textarea', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
-                                    value: selectedElement.data.data.onentry || '',
-                                    onChange: (e) => onInputChange('onentry', e.target.value)
-                                })
-                            ),
-                            React.createElement('div', { key: 'onexit-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'OnExit Script'),
-                                React.createElement('textarea', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none font-mono text-xs h-24',
-                                    value: selectedElement.data.data.onexit || '',
-                                    onChange: (e) => onInputChange('onexit', e.target.value)
-                                })
-                            ),
-                            // 自循環 (Loops) 區塊
-                            React.createElement('div', { key: 'loops-section', className: 'mt-4 border-t border-[#334155] pt-4' },
-                                React.createElement('div', { className: 'flex justify-between items-center mb-2' },
-                                    React.createElement('label', { className: 'block text-gray-400 font-semibold' }, '循環 (Loops)'),
-                                    React.createElement('button', {
-                                        className: 'bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-[10px] transition-colors',
-                                        onClick: () => {
-                                            const currentLoops = selectedElement.data.data.loops || [];
-                                            const newLoops = [...currentLoops, { event: 'new.event', cond: '' }];
-                                            onInputChange('loops', newLoops);
-                                        }
-                                    }, '+ 新增')
-                                ),
-                                React.createElement('div', { className: 'space-y-3' },
-                                    (selectedElement.data.data.loops || []).map((loop, idx) => 
-                                        React.createElement('div', { key: 'loop-edit-' + idx, className: 'bg-[#0f172a] p-2 rounded border border-[#334155] relative' },
-                                            React.createElement('button', {
-                                                className: 'absolute top-1 right-1 text-gray-500 hover:text-red-500',
-                                                onClick: () => {
-                                                    const newLoops = selectedElement.data.data.loops.filter((_, i) => i !== idx);
-                                                    onInputChange('loops', newLoops);
-                                                }
-                                            }, '✕'),
-                                            React.createElement('div', { className: 'mb-2' },
-                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Event'),
-                                                React.createElement('input', {
-                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
-                                                    value: loop.event || '',
-                                                    onChange: (e) => {
-                                                        const newLoops = [...selectedElement.data.data.loops];
-                                                        newLoops[idx] = { ...newLoops[idx], event: e.target.value };
-                                                        onInputChange('loops', newLoops);
-                                                    }
-                                                })
-                                            ),
-                                            React.createElement('div', null,
-                                                React.createElement('label', { className: 'block text-[10px] text-gray-500 mb-0.5' }, 'Condition'),
-                                                React.createElement('input', {
-                                                    className: 'w-full bg-[#1e293b] border border-[#334155] px-2 py-1 rounded text-white text-xs outline-none focus:border-blue-500',
-                                                    value: loop.cond || '',
-                                                    onChange: (e) => {
-                                                        const newLoops = [...selectedElement.data.data.loops];
-                                                        newLoops[idx] = { ...newLoops[idx], cond: e.target.value };
-                                                        onInputChange('loops', newLoops);
-                                                    }
-                                                })
-                                            )
-                                        )
-                                    ),
-                                    (selectedElement.data.data.loops || []).length === 0 && 
-                                        React.createElement('div', { className: 'text-gray-500 text-xs italic text-center py-2' }, '目前無自循環')
-                                )
-                            ),
-                            // 離開 (Outgoing) Transitions - 包含自循環
-                            React.createElement('div', { key: 'outgoing-transitions-list', className: 'mt-4' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '離開 (' + processedEdges.filter(e => e.source === selectedElement.data.id).length + ')'),
-                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
-                                    processedEdges.filter(e => e.source === selectedElement.data.id).map((edge, idx) =>
-                                        React.createElement('div', {
-                                            key: 'out-' + idx,
-                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
-                                            onClick: () => {
-                                                const elem = {
-                                                    type: 'edge',
-                                                    data: edge
-                                                };
-                                                setSelectedElement(elem);
-                                                if (flowWrapperRef.focusElement) {
-                                                    flowWrapperRef.focusElement(elem);
-                                                }
-                                            }
-                                        },
-                                            React.createElement('div', { className: 'flex justify-between items-center' },
-                                                React.createElement('span', { 
-                                                    className: 'font-semibold',
-                                                    style: { color: edge.style?.stroke || '#888' }
-                                                }, (edge.data?.label || edge.label || '(no event)')),
-                                                React.createElement('span', { className: 'text-gray-500' }, 
-                                                    edge.source === edge.target ? '↺ 自循環' : '→ ' + edge.target
-                                                )
-                                            ),
-                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
-                                        )
-                                    ).concat(
-                                        processedEdges.filter(e => e.source === selectedElement.data.id).length === 0 
-                                            ? [React.createElement('div', { key: 'no-out', className: 'text-gray-500 text-xs italic' }, '無離開的 transitions')]
-                                            : []
-                                    )
-                                )
-                            ),
-                            // 進入 (Incoming) Transitions - 不包含自循環
-                            React.createElement('div', { key: 'incoming-transitions-list', className: 'mt-4' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '進入 (' + processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length + ')'),
-                                React.createElement('div', { className: 'space-y-2 max-h-48 overflow-y-auto' },
-                                    processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).map((edge, idx) =>
-                                        React.createElement('div', {
-                                            key: 'in-' + idx,
-                                            className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
-                                            onClick: () => {
-                                                const elem = {
-                                                    type: 'edge',
-                                                    data: edge
-                                                };
-                                                setSelectedElement(elem);
-                                                if (flowWrapperRef.focusElement) {
-                                                    flowWrapperRef.focusElement(elem);
-                                                }
-                                            }
-                                        },
-                                            React.createElement('div', { className: 'flex justify-between items-center' },
-                                                React.createElement('span', { className: 'text-gray-500' }, edge.source + ' →'),
-                                                React.createElement('span', { 
-                                                    className: 'font-semibold',
-                                                    style: { color: edge.style?.stroke || '#888' }
-                                                }, (edge.data?.label || edge.label || '(no event)'))
-                                            ),
-                                            edge.cond && React.createElement('div', { className: 'text-gray-400 mt-1 italic' }, 'Cond: ' + edge.cond)
-                                        )
-                                    ).concat(
-                                        processedEdges.filter(e => e.target === selectedElement.data.id && e.source !== e.target).length === 0 
-                                            ? [React.createElement('div', { key: 'no-in', className: 'text-gray-500 text-xs italic' }, '無進入的 transitions')]
-                                            : []
-                                    )
-                                )
-                            )
-                        ] : [
-                        React.createElement('div', { key: 'event-field' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Event'),
-                            React.createElement('input', {
-                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                value: (selectedElement.data.label || '').replace(/\s*\(\d+,\s*\d+\)$/, ''),
-                                onChange: (e) => onInputChange('label', e.target.value)
-                            })
-                        ),
-                            React.createElement('div', { key: 'qt-position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Qt Position'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: selectedElement.data.qtPoint ? 
-                                        selectedElement.data.qtPoint.x + ', ' + selectedElement.data.qtPoint.y : 'N/A',
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'edge-position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Layout Position (Relative)'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: (() => {
-                                        if (selectedElement.data.source && selectedElement.data.target && nodes) {
-                                            const sourceNode = nodes.find(n => n.id === selectedElement.data.source);
-                                            const targetNode = nodes.find(n => n.id === selectedElement.data.target);
-                                            if (sourceNode && targetNode && sourceNode.position && targetNode.position && selectedElement.data.source !== selectedElement.data.target) {
-                                                const sx = sourceNode.position.x + (sourceNode.width || 200) / 2;
-                                                const sy = sourceNode.position.y + (sourceNode.height || 50) / 2;
-                                                const tx = targetNode.position.x + (targetNode.width || 200) / 2;
-                                                const ty = targetNode.position.y + (targetNode.height || 50) / 2;
-                                                return Math.round((sx + tx) / 2) + ', ' + Math.round((sy + ty) / 2);
-                                            }
-                                        }
-                                        // Fallback to label parsing if nodes not found
-                                        const label = selectedElement.data.label || '';
-                                        if (typeof label !== 'string') return 'Auto';
-                                        const match = label.match(/\s*\((\d+),\s*(\d+)\)$/);
-                                        return match ? match[1] + ', ' + match[2] : 'Auto';
-                                    })(),
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-                            React.createElement('div', { key: 'edge-abs-position-field' },
-                                React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Absolute Position'),
-                                React.createElement('input', {
-                                    className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                    value: (() => {
-                                        const getAbs = (n) => {
-                                            if (!n || !n.position) return { x: 0, y: 0 };
-                                            let x = n.position.x;
-                                            let y = n.position.y;
-                                            let pid = n.data && n.data.parentNode; 
-                                            while(pid) {
-                                                const p = nodes.find(x => x.id === pid);
-                                                if(!p) break;
-                                                x += p.position.x;
-                                                y += p.position.y;
-                                                pid = p.data && p.data.parentNode;
-                                            }
-                                            return { x, y };
-                                        };
-
-                                        if (selectedElement.data.source && selectedElement.data.target && nodes) {
-                                            const sourceNode = nodes.find(n => n.id === selectedElement.data.source);
-                                            const targetNode = nodes.find(n => n.id === selectedElement.data.target);
-                                            
-                                            if (sourceNode && targetNode && selectedElement.data.source !== selectedElement.data.target) {
-                                                const sPos = getAbs(sourceNode);
-                                                const tPos = getAbs(targetNode);
-                                                
-                                                const sx = sPos.x + (sourceNode.width || 200) / 2;
-                                                const sy = sPos.y + (sourceNode.height || 50) / 2;
-                                                const tx = tPos.x + (targetNode.width || 200) / 2;
-                                                const ty = tPos.y + (targetNode.height || 50) / 2;
-                                                
-                                                return Math.round((sx + tx) / 2) + ', ' + Math.round((sy + ty) / 2);
-                                            }
-                                        }
-                                        return 'N/A';
-                                    })(),
-                                    readOnly: true,
-                                    style: { opacity: 0.5 }
-                                })
-                            ),
-
-
-                        React.createElement('div', { key: 'cond-field' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-1' }, 'Condition (cond)'),
-                            React.createElement('input', {
-                                className: 'w-full bg-[#0f172a] border border-[#334155] p-2 rounded text-white focus:border-blue-500 outline-none',
-                                value: selectedElement.data.cond || '',
-                                onChange: (e) => onInputChange('cond', e.target.value)
-                            })
-                        ),
-                        // 開始 State (Source)
-                        React.createElement('div', { key: 'source-state', className: 'mt-4' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '開始 State'),
-                            React.createElement('div', { className: 'space-y-2' },
-                                nodes.filter(node => node.id === selectedElement.data.source).map((node, idx) =>
-                                    React.createElement('div', {
-                                        key: 'source-' + idx,
-                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
-                                        style: {
-                                            borderLeftWidth: '3px',
-                                            borderLeftColor: node.data?.borderColor || '#4299e1'
-                                        },
-                                        onClick: () => {
-                                            const elem = {
-                                                type: 'node',
-                                                data: node
-                                            };
-                                            setSelectedElement(elem);
-                                            if (flowWrapperRef.focusElement) {
-                                                flowWrapperRef.focusElement(elem);
-                                            }
-                                        }
-                                    },
-                                        React.createElement('div', { className: 'flex justify-between items-center' },
-                                            React.createElement('span', { 
-                                                className: 'font-semibold',
-                                                style: { color: node.data?.borderColor || '#4299e1' }
-                                            }, node.data?.label || node.id),
-                                            React.createElement('span', { className: 'text-gray-500 text-[10px]' }, node.data?.type || 'state')
-                                        ),
-                                        React.createElement('div', { className: 'text-gray-400 mt-1 text-[10px]' }, 
-                                            'ID: ' + node.id + ' (' + Math.round(node.position.x + (node.width || 200) / 2) + ', ' + Math.round(node.position.y + (node.height || 50) / 2) + ')'
-                                        )
-                                    )
-                                )
-                            )
-                        ),
-                        // 結束 State (Target)
-                        React.createElement('div', { key: 'target-state', className: 'mt-4' },
-                            React.createElement('label', { className: 'block text-gray-400 mb-2 font-semibold' }, '結束 State'),
-                            React.createElement('div', { className: 'space-y-2' },
-                                nodes.filter(node => node.id === selectedElement.data.target).map((node, idx) =>
-                                    React.createElement('div', {
-                                        key: 'target-' + idx,
-                                        className: 'bg-[#0f172a] border border-[#334155] p-2 rounded text-xs cursor-pointer hover:border-blue-500 transition-colors',
-                                        style: {
-                                            borderLeftWidth: '3px',
-                                            borderLeftColor: node.data?.borderColor || '#4299e1'
-                                        },
-                                        onClick: () => {
-                                            const elem = {
-                                                type: 'node',
-                                                data: node
-                                            };
-                                            setSelectedElement(elem);
-                                            if (flowWrapperRef.focusElement) {
-                                                flowWrapperRef.focusElement(elem);
-                                            }
-                                        }
-                                    },
-                                        React.createElement('div', { className: 'flex justify-between items-center' },
-                                            React.createElement('span', { 
-                                                className: 'font-semibold',
-                                                style: { color: node.data?.borderColor || '#4299e1' }
-                                            }, node.data?.label || node.id),
-                                            React.createElement('span', { className: 'text-gray-500 text-[10px]' }, node.data?.type || 'state')
-                                        ),
-                                        React.createElement('div', { className: 'text-gray-400 mt-1 text-[10px]' }, 
-                                            'ID: ' + node.id + ' (' + Math.round(node.position.x + (node.width || 200) / 2) + ', ' + Math.round(node.position.y + (node.height || 50) / 2) + ')'
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    ]
-                )
+                    }
+                })
             );
         }
-
         window.addEventListener('message', event => {
             const message = event.data;
             if (message.command === 'init') {
